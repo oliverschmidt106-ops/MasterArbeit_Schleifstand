@@ -1,0 +1,11 @@
+# Abhaengigkeiten dieser Komponente. Der ESP-IDF Component Manager laedt
+# FastAccelStepper beim ersten `idf.py build` automatisch nach managed_components/.
+#
+# FastAccelStepper unterstuetzt ESP-IDF (>=5.3) nativ (eigener Rampen-Task,
+# MCPWM/PCNT bzw. RMT). Siehe Lib-Doku fuer Details.
+#
+# HINWEIS: Falls der vom Repo registrierte Komponentenname abweicht, den
+# Namen hier UND in CMakeLists.txt (REQUIRES) entsprechend anpassen.
+dependencies:
+  idf:
+    version: ">=5.2"

@@ -1,0 +1,18 @@
+# Voreinstellungen, die menuconfig/sdkconfig beim ersten Build übernimmt.
+# Aenderbar per `idf.py menuconfig`.
+
+# Zielchip
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Konsole / Logging auf USB-Serial-JTAG ---
+# Damit landet ESP_LOG auf dem nativen USB-JTAG-Port und verschmutzt NICHT
+# den Befehlskanal (UART0 -> USB-UART-Bridge -> COM-Port fuer LabVIEW).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# UART0 NICHT als Konsole benutzen (wird vom Protokoll-Treiber belegt):
+# CONFIG_ESP_CONSOLE_UART_DEFAULT ist damit abgewaehlt.
+
+# FreeRTOS-Tick 1 kHz (feinere Zeitscheiben fuer Steuer-Task)
+CONFIG_FREERTOS_HZ=1000
+
+# C++ Exceptions aus (kleinere Binary, Standard fuer ESP-IDF)
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
