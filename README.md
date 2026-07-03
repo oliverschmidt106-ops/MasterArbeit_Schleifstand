@@ -95,26 +95,37 @@ setzt den Nullpunkt.
 
 ## Lichtschranken / Endlagen (3 Sensoren)
 
-Drei Gabellichtschranken **SK-205NA-W** (NPN, Open-Collector) dienen als
-Stop-Mechanismus und Referenz. Einheitliche Konvention **active-high**:
-**Pin LOW = Bewegung erlaubt**, **Pin HIGH = gesperrt/stop**. Die Strahl-Polarität
-wird über die **Aderwahl** gesetzt, nicht in der Firmware.
+Drei Gabellichtschranken **SK-205NA-W** dienen als Stop-Mechanismus und Referenz.
+Einheitliche Konvention für alle drei Kanäle: **HIGH (~3,2 V) = Bewegung erlaubt**,
+**LOW (0 V) = gesperrt/stop**. Jeder Fehler führt auf LOW → stop (fail-safe).
+
+> **Hardware-Korrektur (verbindlich):** Die Ausgänge sind **keine echten
+> Open-Collector**, auch wenn das Datenblatt das suggeriert. Messung am realen
+> Bauteil: aktiver Zustand → Ausgang **treibt aktiv +5 V**; inaktiver Zustand →
+> Ausgang **floatet** (hochohmig). Deshalb **kein Pull-up**, sondern pro Signal
+> ein **Spannungsteiler 1,8 kΩ (in Reihe) + 3,3 kΩ (nach GND)**: getriebene 5 V
+> → ~3,2 V = HIGH; floatend → 3,3 kΩ zieht auf 0 V = LOW.
 
 **Verdrahtung (ESP32-S3):**
 
-| Sensor            | GPIO | Ader (Ausgang) | Schalttyp  | Funktion                                              |
-|-------------------|------|----------------|------------|-------------------------------------------------------|
-| TN-Zonengatter    | **9**  | schwarz ④     | Dark.on    | HIGH = außerhalb Zone → **stop** (beide Richtungen)   |
-| FV-Limit **FWD**  | **10** | weiß ②        | Light.on   | HIGH = Limit vorwärts → **FWD stoppen**               |
-| FV-Limit **BACK** | **11** | weiß ②        | Light.on   | HIGH = Limit zurück → **BACK stoppen**                |
+| Sensor            | GPIO | Ader (Ausgang) | Pin-Logik                                             |
+|-------------------|------|----------------|-------------------------------------------------------|
+| TN-Zonengatter    | **9**  | weiß ②        | im Gatter = HIGH = **erlaubt**; frei = LOW = **stop** (beide Richtungen) |
+| FV-Limit **FWD**  | **10** | schwarz ④     | frei = HIGH = **fahren**; Limit = LOW = **FWD stoppen**|
+| FV-Limit **BACK** | **11** | schwarz ④     | frei = HIGH = **fahren**; Limit = LOW = **BACK stoppen**|
 
-- Versorgung je Sensor: **braun ① → 5V**, **blau ③ → GND**. Der Signalausgang
-  bekommt einen **externen 4,7 kΩ Pull-up nach 3V3** (kein 5 V an den GPIO —
-  ESP32-S3 ist nicht 5-V-tolerant). Intern bleibt der Pull-up zusätzlich aktiv.
-- **Fail-safe:** Drahtbruch / Sensor stromlos → Pull-up zieht HIGH → **stop**.
-- **Entprellung:** Da optisch prellfrei, aber Motor-EMI-empfindlich, wird jeder
-  Pegel erst nach **`LIMIT_DEBOUNCE_MS` = 3 ms** stabiler Lesungen übernommen.
-  Ein eigener `limit_task` tastet die Pins alle **`LIMIT_SAMPLE_MS` = 1 ms** ab.
+- Versorgung je Sensor: **braun ① → 5V**, **blau ③ → GND**. Gemeinsame Masse
+  (Sensorversorgung, Teiler-GND, ESP-GND) ist vorausgesetzt; der Teiler hält das
+  GPIO ≤ 3,3 V (ESP32-S3 ist nicht 5-V-tolerant).
+- **Pins ohne internen Pull** (`GPIO_PULLUP_DISABLE` + `GPIO_PULLDOWN_DISABLE`) —
+  ein interner Pull-up würde den 3,3-kΩ-Zweig verfälschen; den Pegel definiert
+  ausschließlich der externe Teiler.
+- **Fail-safe:** Drahtbruch / Sensor stromlos → Ausgang floatet → Teiler → LOW →
+  **stop** (alle drei Kanäle).
+- **Entprellung:** Mehrheitsfilter gegen Motor-EMI — ein Zustandswechsel gilt erst
+  nach **`SENSOR_VOTE_SAMPLES` = 3** gleichen Lesungen; ein einzelner Störimpuls
+  löst keinen Stop aus. Ein eigener `limit_task` tastet alle **`SENSOR_SAMPLE_MS`
+  = 1 ms** ab (≈ `SENSOR_DEBOUNCE_MS` = 3 ms Fenster).
 
 **Verhalten:**
 
@@ -122,10 +133,16 @@ wird über die **Aderwahl** gesetzt, nicht in der Firmware.
   zur Rückfahrt frei), BACK umgekehrt. `FV:HOME` referenziert gegen das
   BACK-Limit (GPIO 11) und setzt dort den Nullpunkt.
 - **TN** hat ein einzelnes **Zonengatter** als symmetrische Hard-Zone (intern auf
-  MIN *und* MAX gelegt): sobald HIGH, wird **jede** Fahrtrichtung gestoppt. Es ist
-  **keine** Referenz — die Absolutposition liefert der AS5600; `TN:HOME` wird im
-  Normalbetrieb nicht verwendet. Der reguläre Soll-Bereich wird ohnehin durch
-  `TN_ANGLE_MIN/MAX_DEG` (0–90°) eingegrenzt, das Gatter ist die Not-Backstop.
+  MIN *und* MAX gelegt): solange HIGH (in der Zone), ist TN frei; verlässt TN die
+  Zone (LOW), wird **sofort gestoppt**. Damit kein Deadlock entsteht, sperrt LOW
+  **nicht** komplett: über den **AS5600-Absolutwinkel** wird die Seite relativ zur
+  Zonenmitte (`(TN_ANGLE_MIN+MAX_DEG)/2`) bestimmt und nur die Bewegung **zurück
+  zur Mitte** (ins Gatter) erlaubt — **Re-Entry**. Sobald wieder HIGH, volle
+  Freigabe. Das Gatter ist **keine** Referenz (die Absolutposition liefert der
+  AS5600; `TN:HOME` wird im Normalbetrieb nicht verwendet); der reguläre
+  Soll-Bereich wird ohnehin durch `TN_ANGLE_MIN/MAX_DEG` (0–90°) eingegrenzt, das
+  Gatter ist der Not-Backstop. *(Sonderfall: fehlt bei LOW der Magnet, ist die
+  Seite nicht bestimmbar → fail-safe in beide Richtungen gesperrt.)*
 
 ## Serielle Parameter (für LabVIEW VISA)
 
@@ -156,6 +173,7 @@ Befehle/Achsen sind case-insensitiv.
 | `PING`        | `OK`           | Verbindungstest (Verbinden)               |
 | `STOP`        | `OK`           | **Sofort-Stopp aller Achsen**             |
 | `STATUS`      | `STATUS:...`   | Statuszeile (siehe unten)                 |
+| `SENS?`       | `SENS:<tn>,<fwd>,<back>` | Logische Lichtschranken-Zustände, je `1`=erlaubt/`0`=stop |
 | `ENABLE`      | `OK`           | Treiber freigeben (EN LOW)                |
 | `DISABLE`     | `OK`           | Alle stoppen + Treiber sperren (EN HIGH)  |
 | `LIGHT:ON`    | `OK`           | Beleuchtung an                            |
@@ -206,13 +224,15 @@ STATUS:CONN=1,EN=<0|1>,LIGHT=<0|1>,TR=<0|1>,FR=<0|1>,
 FV=<mm>,FVrun=<0|1>,TN=<grad>,TNrun=<0|1>,
 FVmin=<0|1>,FVmax=<0|1>,TNmin=<0|1>,TNmax=<0|1>,
 HOMEfv=<0..4>,HOMEtn=<0..4>,
-TNsens=<grad>,TNmag=<0|1>,TNcl=<0..3>
+TNsens=<grad>,TNmag=<0|1>,TNcl=<0..3>,
+SENStn=<0|1>,SENSfwd=<0|1>,SENSback=<0|1>
 ```
 (eine Zeile, ohne Umbrüche). `HOMExx`: 0=Idle 1=Seeking 2=Backoff 3=Done 4=Error.
-`TR`/`FR`/`*run` = läuft (1) / steht (0). `*min`/`*max` = Endlage ausgelöst (1).
-`TN` = Winkel aus Schrittzähler, **`TNsens`** = gemessener Ist-Winkel (AS5600),
-`TNmag` = Magnet erkannt (1), `TNcl` = Closed-Loop-Zustand (0=Idle 1=Moving
-2=Done 3=Error).
+`TR`/`FR`/`*run` = läuft (1) / steht (0). `*min`/`*max` = Endlage **gesperrt** (1,
+d. h. Pegel LOW). `TN` = Winkel aus Schrittzähler, **`TNsens`** = gemessener
+Ist-Winkel (AS5600), `TNmag` = Magnet erkannt (1), `TNcl` = Closed-Loop-Zustand
+(0=Idle 1=Moving 2=Done 3=Error). **`SENStn`/`SENSfwd`/`SENSback`** = dieselben
+logischen Werte wie `SENS?` (1=erlaubt/0=stop).
 
 ### Fehlerantworten
 
@@ -225,9 +245,10 @@ TNsens=<grad>,TNmag=<0|1>,TNcl=<0..3>
 - Treiber bei Boot **deaktiviert** (EN HIGH); erst durch ersten Fahrbefehl bzw.
   `ENABLE` freigegeben.
 - `STOP` hält **sofort** alle Achsen an (ohne Rampe) und bricht eine Winkelfahrt ab.
-- Lichtschranken **active-high** (HIGH = stop), 3 ms entprellt, fail-safe bei
-  Drahtbruch. FV stoppt richtungsabhängig (FWD/BACK), das TN-Zonengatter
-  symmetrisch in beide Richtungen.
+- Lichtschranken **HIGH = erlaubt / LOW = stop**, per Mehrheitsfilter (3 Reads)
+  entprellt, fail-safe bei Drahtbruch (floatend → LOW → stop). FV stoppt
+  richtungsabhängig (FWD/BACK), das TN-Zonengatter stoppt beim Verlassen der Zone
+  und erlaubt nur die AS5600-gestützte Rückfahrt zur Mitte (Re-Entry, kein Deadlock).
 - Homing **und** die TN-Winkelregelung laufen als nicht-blockierende
   State-Machines (keine `while`-Warteschleife).
 - Die TN-Winkelfahrt bricht ab bei Endlage, **fehlendem Magnet** oder Timeout.
@@ -240,10 +261,11 @@ Alle in `components/config/include/config.h`:
 - `FV_LEADSCREW_PITCH_MM` — Spindelsteigung → Schritte/mm.
 - `TN_STEPS_PER_DEG_DEFAULT` — Startwert; zur Laufzeit per `TN:CAL` kalibrierbar.
 - `PIN_TN_GATE` / `PIN_FV_LIM_FWD` / `PIN_FV_LIM_BACK` — die 3 Lichtschranken
-  (SK-205NA-W, GPIO 9/10/11, **active-high**: HIGH = stop, externer 4,7k Pull-up
-  → 3V3). TN ist ein symmetrisches Zonengatter (auf MIN+MAX gelegt), FV nutzt
-  gerichtete Endschalter (FWD=MAX, BACK=MIN). `LIMIT_ACTIVE_LEVEL` /
-  `LIMIT_DEBOUNCE_MS` für Polarität und Entprellung.
+  (SK-205NA-W, GPIO 9/10/11, **HIGH = erlaubt / LOW = stop**, externer
+  Spannungsteiler 1k8/3k3, **kein** Pull). TN ist ein symmetrisches Zonengatter
+  (auf MIN+MAX gelegt) mit AS5600-Re-Entry, FV nutzt gerichtete Endschalter
+  (FWD=MAX, BACK=MIN). `SENSOR_GO_LEVEL` / `SENSOR_STOP_LEVEL` für die Polarität,
+  `SENSOR_VOTE_SAMPLES` / `SENSOR_SAMPLE_MS` für den Entprell-Mehrheitsfilter.
 - `*_MIN_HZ` / `*_MAX_HZ` / `*_ACCEL` — Drehzahlband und Rampe pro Achse.
 - `UART_TX_PIN` / `UART_RX_PIN` / `UART_BAUD` — Befehlskanal.
 

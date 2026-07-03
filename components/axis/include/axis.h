@@ -28,9 +28,9 @@ enum class ClState { Idle, Moving, Done, Error };
 
 // Parameter der closed-loop-Winkelregelung (aus config zusammengesetzt).
 struct AngleControlCfg {
-    float    offset_deg     = 0.0f;  // Sensor-Rohgrad bei mechanisch 0 Grad
+    float    offset_deg     = -105.29f;  // Sensor-Rohgrad bei mechanisch 0 Grad
     int      angle_sign     = 1;     // Vorzeichen des gemeldeten Winkels (+1/-1)
-    int      motor_sign     = 1;     // +1: Motor-Vorwaerts erhoeht Winkel, sonst -1
+    int      motor_sign     = -1;     // +1: Motor-Vorwaerts erhoeht Winkel, sonst -1
     float    min_deg        = 0.0f;  // erlaubter Soll-Bereich (Minimum)
     float    max_deg        = 90.0f; // erlaubter Soll-Bereich (Maximum)
     float    tol_deg        = 0.2f;  // Zieltoleranz
@@ -108,6 +108,10 @@ private:
     float hzFrom255(uint8_t value) const;  // lineares Mapping 0..255 -> Hz
     void  updateAngleControl();            // closed-loop SM (in update())
     float computeAngle(uint16_t raw) const;// Rohwert -> gemeldeter Winkel
+    // Darf die Achse in 'forward'-Richtung fahren? Beruecksichtigt die FV-
+    // Endschalter und das TN-Zonengatter inkl. AS5600-Re-Entry (Rueckfahrt zur
+    // Zonenmitte, wenn das Gatter verlassen wurde).
+    bool  driveAllowed(bool forward) const;
 
     const char* name_;
     gpio_num_t  step_pin_;
@@ -130,6 +134,9 @@ private:
     gpio_num_t  limit_max_pin_   = GPIO_NUM_NC;
     bool        home_dir_pos_    = false;
     uint8_t     pos_speed255_    = 0;
+    // Zonengatter (TN): EIN Sensor auf MIN und MAX -> symmetrische Hard-Zone.
+    // Aktiviert die richtungsabhaengige Re-Entry-Logik in driveAllowed().
+    bool        zone_gate_       = false;
 
     // Homing-State-Machine
     HomingState homing_ = HomingState::Idle;

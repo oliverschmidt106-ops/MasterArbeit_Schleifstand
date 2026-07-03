@@ -67,6 +67,9 @@ void Axis::configurePosition(float steps_per_unit, gpio_num_t limit_min,
     limit_min_pin_  = limit_min;
     limit_max_pin_  = limit_max;
     home_dir_pos_   = home_dir_positive;
+    // Gleicher Sensor auf MIN und MAX -> Zonengatter (TN). Aktiviert die
+    // Re-Entry-Logik in driveAllowed(): bei verlassenem Gatter nur Rueckfahrt.
+    zone_gate_ = (limit_min != cfg::PIN_NONE) && (limit_min == limit_max);
 }
 
 float Axis::hzFrom255(uint8_t value) const {
@@ -130,10 +133,15 @@ bool Axis::moveToUnit(float unit) {
     if (cl_active_) return false;       // waehrend Winkelregelung kein Direktfahren
     if (homing_ == HomingState::Seeking || homing_ == HomingState::Backoff)
         return false;  // waehrend Referenzfahrt keine Fahrbefehle
+    int32_t target = static_cast<int32_t>(unit * steps_per_unit_);
+    // Fahrtrichtung aus Ziel vs. Ist ableiten und gegen die Endlage pruefen,
+    // damit eine Direktfahrt nicht in eine gesperrte Endlage kommandiert wird.
+    bool forward = (target > stepper_->getCurrentPosition());
+    if (!driveAllowed(forward)) return false;
+    dir_positive_ = forward;
     uint8_t v = (pos_speed255_ > 0) ? pos_speed255_ : cfg::POS_DEFAULT_SPEED;
     stepper_->setAcceleration(accel_);
     stepper_->setSpeedInHz(static_cast<uint32_t>(hzFrom255(v)));
-    int32_t target = static_cast<int32_t>(unit * steps_per_unit_);
     stepper_->moveTo(target);
     return true;
 }
@@ -143,9 +151,8 @@ bool Axis::jog(bool forward) {
     if (cl_active_) return false;
     if (homing_ == HomingState::Seeking || homing_ == HomingState::Backoff)
         return false;
-    // Endlage in Fahrtrichtung bereits ausgeloest? -> nicht weiterfahren.
-    if (forward && limitMax()) return false;
-    if (!forward && limitMin()) return false;
+    // Sensor-Freigabe in Fahrtrichtung? (FV-Endschalter bzw. TN-Gatter/Re-Entry)
+    if (!driveAllowed(forward)) return false;
     uint8_t v = (pos_speed255_ > 0) ? pos_speed255_ : cfg::POS_DEFAULT_SPEED;
     stepper_->setAcceleration(accel_);
     stepper_->setSpeedInHz(static_cast<uint32_t>(hzFrom255(v)));
@@ -279,15 +286,12 @@ void Axis::updateAngleControl() {
     }
 
     dir_positive_ = (steps > 0);
-    // Endlage in Fahrtrichtung -> Abbruch (Sicherheit).
-    if (dir_positive_ && limitMax()) {
+    // Sensor-Freigabe in Fahrtrichtung pruefen. Beim TN-Zonengatter erlaubt
+    // driveAllowed() ausserhalb der Zone nur die Rueckfahrt zur Mitte (Re-Entry)
+    // und sperrt die Fahrt hinaus -> Sicherheit ohne Deadlock.
+    if (!driveAllowed(dir_positive_)) {
         stepper_->forceStop(); cl_state_ = ClState::Error; cl_active_ = false;
-        ESP_LOGW(TAG, "%s: Endlage MAX bei Winkelfahrt", name_);
-        return;
-    }
-    if (!dir_positive_ && limitMin()) {
-        stepper_->forceStop(); cl_state_ = ClState::Error; cl_active_ = false;
-        ESP_LOGW(TAG, "%s: Endlage MIN bei Winkelfahrt", name_);
+        ESP_LOGW(TAG, "%s: Sensor sperrt Winkelfahrt-Richtung", name_);
         return;
     }
 
@@ -319,6 +323,38 @@ void Axis::forceStop() {
 
 bool Axis::limitMin() const { return cfg::limit_triggered(limit_min_pin_); }
 bool Axis::limitMax() const { return cfg::limit_triggered(limit_max_pin_); }
+
+// Richtungsabhaengige Freigabe (zentrale Stelle fuer FV- und TN-Gating).
+//   FV (gerichtete Endschalter): Vorwaerts nur frei, wenn der FWD-Endschalter
+//   nicht gesperrt ist; Rueckwaerts symmetrisch ueber den BACK-Endschalter.
+//   Die Gegenrichtung bleibt also immer frei, um aus der Endlage zu fahren.
+//
+//   TN (Zonengatter + AS5600): im Gatter (HIGH) volle Freigabe. Verlaesst die
+//   Achse das Gatter (LOW), darf sie NICHT komplett blockieren -> Re-Entry:
+//   Anhand des AS5600-Absolutwinkels wird die Seite relativ zur Zonenmitte
+//   bestimmt und nur die Bewegung ZURUECK zur Mitte (ins Gatter) erlaubt.
+bool Axis::driveAllowed(bool forward) const {
+    if (!zone_gate_) {
+        // FV: gerichtete Endschalter (limit_max_pin_ = FWD, limit_min_pin_ = BACK).
+        return forward ? !limitMax() : !limitMin();
+    }
+
+    // TN-Zonengatter: HIGH = im Gatter -> normale Freigabe.
+    if (cfg::sensor_tn_drive_allowed()) return true;
+
+    // Ausserhalb des Gatters: Seite nur mit gueltigem Magnet bestimmbar.
+    // Ohne Winkel keine sichere Entscheidung -> fail-safe sperren.
+    if (sensor_ == nullptr || !last_magnet_ok_) return false;
+
+    // Zonenmitte = Mitte des erlaubten Soll-Winkelbereichs.
+    const float center = 0.5f * (acfg_.min_deg + acfg_.max_deg);
+    const bool  above_center      = last_angle_deg_ > center;   // Seite der Zone
+    const bool  forward_increases = (acfg_.motor_sign > 0);     // Motor-Vorw. -> Winkel?
+    // Unterhalb der Mitte muss der Winkel groesser werden (und umgekehrt).
+    const bool  need_increase     = !above_center;
+    // Erlaubt, wenn die gewuenschte Fahrtrichtung den Winkel Richtung Mitte bewegt.
+    return forward == (need_increase == forward_increases);
+}
 
 bool Axis::isRunning() const {
     return stepper_ != nullptr && stepper_->isRunning();
@@ -371,15 +407,13 @@ void Axis::update() {
         break;
     }
 
-    // --- Endlagen-Sicherheit (immer, auch ausserhalb Homing) ---
-    // Faehrt die Achse in eine ausgeloeste Endlage, sofort stoppen.
-    if (homing_ != HomingState::Seeking) {
-        if (dir_positive_ && limitMax() && stepper_->isRunning()) {
-            stepper_->forceStop();
-            ESP_LOGW(TAG, "%s: Endlage MAX -> Stop", name_);
-        } else if (!dir_positive_ && limitMin() && stepper_->isRunning()) {
-            stepper_->forceStop();
-            ESP_LOGW(TAG, "%s: Endlage MIN -> Stop", name_);
-        }
+    // --- Endlagen-/Zonen-Sicherheit (immer, auch ausserhalb Homing) ---
+    // Faehrt die Achse in eine gesperrte Richtung (FV-Endschalter ausgeloest
+    // oder TN-Gatter verlassen und Bewegung nicht Richtung Zonenmitte), sofort
+    // stoppen. driveAllowed() kapselt FV-Endschalter und TN-Re-Entry.
+    if (homing_ != HomingState::Seeking && stepper_->isRunning() &&
+        !driveAllowed(dir_positive_)) {
+        stepper_->forceStop();
+        ESP_LOGW(TAG, "%s: Sensor-Sperre in Fahrtrichtung -> Stop", name_);
     }
 }

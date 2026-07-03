@@ -36,10 +36,10 @@ static Axis axis_tn("TN", cfg::PIN_TN_STEP, cfg::PIN_TN_DIR, cfg::TN_DIR_INVERT,
 static Machine machine;
 
 // Hochfrequente Abtast-Task: entprellt die Lichtschranken (Motor-EMI). Laeuft
-// schneller als die Steuer-Task, damit der LIMIT_DEBOUNCE_MS-Filter greift.
+// schneller als die Steuer-Task, damit der SENSOR_VOTE_SAMPLES-Filter greift.
 static void limit_task(void *arg)
 {
-    const TickType_t period = pdMS_TO_TICKS(cfg::LIMIT_SAMPLE_MS);
+    const TickType_t period = pdMS_TO_TICKS(cfg::SENSOR_SAMPLE_MS);
     TickType_t last = xTaskGetTickCount();
     for (;;)
     {

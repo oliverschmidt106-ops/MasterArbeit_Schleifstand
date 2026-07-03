@@ -3,8 +3,6 @@
 
 #include <cstddef>
 
-#include "esp_timer.h"
-
 namespace cfg {
 
 // Interne Zustaende (gespiegelt, damit Abfragen ohne GPIO-Read moeglich sind).
@@ -13,28 +11,26 @@ namespace cfg {
 static bool s_light_on = false;
 
 // ---------------------------------------------------------------------------
-//  Entprellung der Lichtschranken
+//  Entprellung der Lichtschranken (Mehrheitsfilter)
 // ---------------------------------------------------------------------------
-// Zeitbasierter Filter: ein gelesener Pegel wird erst als 'stable' uebernommen,
-// wenn er LIMIT_DEBOUNCE_MS lang unveraendert ist. Abtastung durch limits_poll()
-// (limit_task, alle LIMIT_SAMPLE_MS). Das unterdrueckt kurze Motor-EMI-Glitches,
-// die sonst einen Fehl-Stop ausloesen wuerden.
+// Ein neuer Pegel wird erst als 'stable' uebernommen, wenn er
+// SENSOR_VOTE_SAMPLES Abtastungen in Folge gleich ist. Abtastung durch
+// limits_poll() (limit_task, alle SENSOR_SAMPLE_MS). Ein einzelner verrauschter
+// Read (Motor-EMI) setzt nur den Kandidaten-Zaehler zurueck und loest keinen
+// Zustandswechsel/Fehl-Stop aus.
 struct LimitFilter {
     gpio_num_t   pin;
-    volatile int stable;          // entprellter Pegel (von limit_triggered gelesen)
-    int          last_raw;        // zuletzt gelesener Rohpegel
-    uint32_t     stable_since_ms; // seit wann last_raw unveraendert ist
+    volatile int stable;     // entprellter Pegel (von der Lese-API gelesen)
+    int          candidate;  // aktuell gezaehlter abweichender Pegel
+    int          votes;      // Anzahl gleicher Lesungen fuer 'candidate'
 };
 
-static inline uint32_t now_ms() {
-    return static_cast<uint32_t>(esp_timer_get_time() / 1000);
-}
-
-// Genau die drei real verdrahteten Sensoren. Start fail-safe auf "ausgeloest".
+// Genau die drei real verdrahteten Sensoren. Start fail-safe auf "stop" (LOW):
+// es wird nichts freigegeben, bevor der Filter einen stabilen HIGH-Pegel sieht.
 static LimitFilter s_limits[] = {
-    { PIN_TN_GATE,     LIMIT_ACTIVE_LEVEL, LIMIT_ACTIVE_LEVEL, 0 },
-    { PIN_FV_LIM_FWD,  LIMIT_ACTIVE_LEVEL, LIMIT_ACTIVE_LEVEL, 0 },
-    { PIN_FV_LIM_BACK, LIMIT_ACTIVE_LEVEL, LIMIT_ACTIVE_LEVEL, 0 },
+    { PIN_TN_GATE,     SENSOR_STOP_LEVEL, SENSOR_STOP_LEVEL, 0 },
+    { PIN_FV_LIM_FWD,  SENSOR_STOP_LEVEL, SENSOR_STOP_LEVEL, 0 },
+    { PIN_FV_LIM_BACK, SENSOR_STOP_LEVEL, SENSOR_STOP_LEVEL, 0 },
 };
 static constexpr size_t LIMIT_COUNT = sizeof(s_limits) / sizeof(s_limits[0]);
 
@@ -62,40 +58,39 @@ void init_gpios() {
     gpio_set_level(PIN_LIGHT, 0);
     s_light_on = false;
 
-    // --- Eingaenge: Lichtschranken (active-high) ---
-    // Der externe 4,7k Pull-up nach 3V3 liefert den definierten HIGH-/Fail-safe-
-    // Pegel und dominiert den Pegel. Der interne Pull-Up bleibt zusaetzlich aktiv
-    // (redundanter Fail-safe; ~45k parallel zum 4,7k -> vernachlaessigbar).
+    // --- Eingaenge: Lichtschranken OHNE internen Pull ---
+    // Den Pegel definiert ausschliesslich der externe Spannungsteiler 1k8/3k3.
+    // Ein interner Pull-up wuerde den 3,3k-Zweig verfaelschen, ein interner
+    // Pull-down den HIGH-Pegel absenken -> beide deaktiviert.
     gpio_config_t in_cfg = {};
     in_cfg.mode         = GPIO_MODE_INPUT;
-    in_cfg.pull_up_en   = GPIO_PULLUP_ENABLE;
+    in_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
     in_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
     in_cfg.intr_type    = GPIO_INTR_DISABLE;
     in_cfg.pin_bit_mask = (1ULL << PIN_TN_GATE) | (1ULL << PIN_FV_LIM_FWD) |
                           (1ULL << PIN_FV_LIM_BACK);
     gpio_config(&in_cfg);
 
-    // Entprell-Filter mit dem aktuellen Ist-Pegel vorbelegen (vermeidet einen
-    // unechten Wechsel direkt nach dem Boot).
-    uint32_t t = now_ms();
-    for (size_t i = 0; i < LIMIT_COUNT; ++i) {
-        int lvl = gpio_get_level(s_limits[i].pin);
-        s_limits[i].stable          = lvl;
-        s_limits[i].last_raw        = lvl;
-        s_limits[i].stable_since_ms = t;
-    }
+    // Filter bleibt fail-safe auf SENSOR_STOP_LEVEL vorbelegt (siehe s_limits);
+    // limits_poll() promotet einen Kanal erst nach SENSOR_VOTE_SAMPLES stabilen
+    // HIGH-Lesungen auf "erlaubt". So bewegt sich beim Boot nichts ungeprueft.
 }
 
 void limits_poll() {
-    uint32_t t = now_ms();
     for (size_t i = 0; i < LIMIT_COUNT; ++i) {
-        int raw = gpio_get_level(s_limits[i].pin);
-        if (raw != s_limits[i].last_raw) {
-            s_limits[i].last_raw        = raw;       // neuer Pegel -> Entprell-Timer neu
-            s_limits[i].stable_since_ms = t;
-        } else if (raw != s_limits[i].stable &&
-                   (t - s_limits[i].stable_since_ms) >= LIMIT_DEBOUNCE_MS) {
-            s_limits[i].stable = raw;                // lange genug stabil -> uebernehmen
+        LimitFilter& f = s_limits[i];
+        int raw = gpio_get_level(f.pin);
+        if (raw == f.stable) {
+            f.candidate = raw;   // Pegel bestaetigt den stabilen Zustand -> Reset
+            f.votes     = 0;
+        } else if (raw == f.candidate) {
+            if (++f.votes >= SENSOR_VOTE_SAMPLES) {
+                f.stable = raw;  // lange genug konstant abweichend -> uebernehmen
+                f.votes  = 0;
+            }
+        } else {
+            f.candidate = raw;   // neuer abweichender Pegel -> Zaehlung neu starten
+            f.votes     = 1;
         }
     }
 }
@@ -119,12 +114,23 @@ void set_light(bool on) {
 
 bool light_on() { return s_light_on; }
 
+// Entprellten Pegel eines Sensorpins lesen; unbekannt/PIN_NONE -> fail-safe STOP.
+static int sensor_level(gpio_num_t pin) {
+    const LimitFilter* f = find_limit(pin);
+    return (f != nullptr) ? f->stable : SENSOR_STOP_LEVEL;
+}
+
+// Logische Lese-API: erlaubt == entprellter Pegel HIGH (SENSOR_GO_LEVEL).
+bool sensor_tn_drive_allowed() { return sensor_level(PIN_TN_GATE)     == SENSOR_GO_LEVEL; }
+bool sensor_fv_fwd_allowed()   { return sensor_level(PIN_FV_LIM_FWD)  == SENSOR_GO_LEVEL; }
+bool sensor_fv_back_allowed()  { return sensor_level(PIN_FV_LIM_BACK) == SENSOR_GO_LEVEL; }
+
 bool limit_triggered(gpio_num_t pin) {
     if (pin == PIN_NONE) return false;
     const LimitFilter* f = find_limit(pin);
-    if (f == nullptr) return false;            // unbekannter Pin -> nicht ausgeloest
-    // active-high: ausgeloest, wenn der entprellte Pegel HIGH ist.
-    return f->stable == LIMIT_ACTIVE_LEVEL;
+    if (f == nullptr) return false;            // unbekannter Pin -> nicht gesperrt
+    // Neue Konvention: gesperrt, wenn der entprellte Pegel LOW ist (stop).
+    return f->stable == SENSOR_STOP_LEVEL;
 }
 
 }  // namespace cfg

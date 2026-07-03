@@ -161,7 +161,8 @@ static void build_status(Machine* m, char* resp) {
         "FV=%.2f,FVrun=%d,TN=%.2f,TNrun=%d,"
         "FVmin=%d,FVmax=%d,TNmin=%d,TNmax=%d,"
         "HOMEfv=%d,HOMEtn=%d,"
-        "TNsens=%.2f,TNmag=%d,TNcl=%d",
+        "TNsens=%.2f,TNmag=%d,TNcl=%d,"
+        "SENStn=%d,SENSfwd=%d,SENSback=%d",
         cfg::drivers_enabled() ? 1 : 0, cfg::light_on() ? 1 : 0,
         (m->tr && m->tr->isRunning()) ? 1 : 0,
         (m->fr && m->fr->isRunning()) ? 1 : 0,
@@ -174,7 +175,10 @@ static void build_status(Machine* m, char* resp) {
         (m->tn && m->tn->limitMin()) ? 1 : 0,
         (m->tn && m->tn->limitMax()) ? 1 : 0,
         hfv, htn,
-        tn_ang, tn_mag, tn_cl);
+        tn_ang, tn_mag, tn_cl,
+        cfg::sensor_tn_drive_allowed() ? 1 : 0,
+        cfg::sensor_fv_fwd_allowed()   ? 1 : 0,
+        cfg::sensor_fv_back_allowed()  ? 1 : 0);
 }
 
 static void process_line(Machine* m, char* line, char* resp) {
@@ -192,6 +196,15 @@ static void process_line(Machine* m, char* line, char* resp) {
         if (strcmp(t0, "PING") == 0)        { strcpy(resp, "OK"); return; }
         if (strcmp(t0, "STOP") == 0)        { m->stopAll(); strcpy(resp, "OK"); return; }
         if (strcmp(t0, "STATUS") == 0)      { build_status(m, resp); return; }
+        // Logische Lichtschranken-Zustaende fuer LabVIEW: je 1 = erlaubt, 0 = stop.
+        // Reihenfolge: TN-Gatter, FV vorwaerts, FV rueckwaerts.
+        if (strcmp(t0, "SENS?") == 0) {
+            snprintf(resp, MAX_RESPONSE, "SENS:%d,%d,%d",
+                     cfg::sensor_tn_drive_allowed() ? 1 : 0,
+                     cfg::sensor_fv_fwd_allowed()   ? 1 : 0,
+                     cfg::sensor_fv_back_allowed()  ? 1 : 0);
+            return;
+        }
         // ENABLE/DISABLE sind manuelle Overrides; im Normalbetrieb regelt das
         // Auto-Enable von FastAccelStepper den gemeinsamen EN-Pin selbst.
         if (strcmp(t0, "ENABLE") == 0)      { cfg::set_drivers_enabled(true);  strcpy(resp, "OK"); return; }

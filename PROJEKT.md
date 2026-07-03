@@ -39,9 +39,11 @@ dokumentierte ESP-IDF-Firmware als Grundgerüst.
 - Faservorschub (FV): STEP=15, DIR=16
 - Tischneigung (TN): STEP=17, DIR=18
 - EN (alle): 8 (aktiv LOW)
-- Lichtschranken (3x SK-205NA-W, NPN Open-Collector, ACTIVE-HIGH = stop):
-  9=TN-Zonengatter, 10=FV-Limit-FWD, 11=FV-Limit-BACK. Je externer 4,7k
-  Pull-up -> 3V3 (Fail-safe HIGH), zusaetzlich interner Pull-up. 3-ms-Entprellung.
+- Lichtschranken (3x SK-205NA-W, aktiv treibende Ausgaenge, KONVENTION HIGH=erlaubt/LOW=stop):
+  9=TN-Zonengatter, 10=FV-Limit-FWD, 11=FV-Limit-BACK. Ausgang treibt aktiv +5 V
+  bzw. floatet; je Signal externer Spannungsteiler 1,8k(Reihe)+3,3k(GND) -> ~3,2 V=HIGH,
+  floatend=0 V=LOW. KEIN Pull-up (intern AUS, sonst Teiler verfaelscht). Fail-safe:
+  Bruch/stromlos -> floatend -> LOW -> stop. Mehrheitsfilter (3 gleiche Reads).
 - Beleuchtung (Ausgang, schaltet MOSFET): 14
   GPIOs über den IDF-gpio-Treiber (gpio_config) initialisieren.
 
@@ -72,7 +74,9 @@ dokumentierte ESP-IDF-Firmware als Grundgerüst.
   Muss alle GUI-Aktionen abdecken (Verbinden; TR/FR Start/Stop/Speed/Dir;
   FV Vor/Zurück/Home/Speed; TN Neigen/Senken/Home/Fahren(Winkel)/Speed; Beleuchtung).
   Jeder Befehl wird mit OK/ERR quittiert. STATUS liefert Ist-Position (FV),
-  Ist-Winkel (TN), Endlagen-Status, Verbindungszustand. Befehlstabelle in README.
+  Ist-Winkel (TN), Endlagen-Status, Verbindungszustand. Zusaetzlich `SENS?`
+  -> `SENS:<tn>,<fwd>,<back>` (je 1=erlaubt/0=stop) fuer die drei logischen
+  Lichtschranken-Zustaende. Befehlstabelle in README.
 
 ## Architektur
 
@@ -89,6 +93,8 @@ dokumentierte ESP-IDF-Firmware als Grundgerüst.
 - Treiber bei Boot deaktiviert (EN HIGH).
 - Globaler STOP hält sofort alle Achsen an.
 - FV und TN dürfen nicht über die Endschalter hinaus; bei Auslösung sofort stoppen.
+- TN-Zonengatter ist fail-safe-Backstop: verlässt TN die Zone (LOW), stoppt es;
+  Rückfahrt zur Zonenmitte bleibt über die AS5600-Re-Entry-Logik erlaubt (kein Deadlock).
 
 ## Konventionen
 
