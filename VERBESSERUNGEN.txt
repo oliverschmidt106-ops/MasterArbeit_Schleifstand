@@ -1,0 +1,148 @@
+===========================================================================
+ CODE-REVIEW / VERBESSERUNGSVORSCHLAEGE  (Stand 2026-07-03)
+ Projekt: ESP32-S3 Glasfaser-Schleifstand Firmware
+===========================================================================
+
+---------------------------------------------------------------------------
+ TEIL A: WINKELREGELUNG TN:GOTO — URSACHEN & UMGESETZTE FIXES
+---------------------------------------------------------------------------
+
+Gefundene Ursachen fuer "faehrt nicht zuverlaessig auf den Sollwinkel":
+
+A1) "steps == 0 -> Done"-Bug (axis.cpp, updateAngleControl):
+    Rundete der gedaempfte Teilschritt auf 0 Steps, meldete die Regelung
+    "Ziel erreicht", obwohl der Restfehler noch GROESSER als die Toleranz
+    sein konnte. -> FIX: Mindestschritt +/-1 statt vorzeitigem Done.
+
+A2) Falsche Steps/Grad-Annahme (Hauptursache fuer Timeout-Abbrueche):
+    Die Teilschritte wurden aus steps_per_unit_ (Default 8,89 Steps/Grad,
+    d.h. Motor 1:1 auf der Welle) berechnet. Sitzt eine Untersetzung
+    dazwischen, bewegte jeder Teilschritt real nur einen Bruchteil ->
+    sehr viele Iterationen -> Sicherheits-Timeout mitten in der Fahrt
+    (erklaert den Abbruch bei ~70 Grad auf dem Weg 85 -> 60).
+    -> FIX: adaptiver Gain (cl_gain_): nach jeder abgeschlossenen
+    Teilbewegung wird "kommandierte Grad" mit "tatsaechlich gefahrenen
+    Grad" (AS5600) verglichen und der Gain nachgefuehrt (begrenzt auf
+    0,1 .. 20). Wirkt nur in der Winkelregelung, nicht auf moveToUnit().
+
+A3) Kein Ueberschwing-Schutz:
+    Waehrend einer laufenden Teilbewegung wurde der Winkel nicht gegen
+    das Ziel geprueft. -> FIX: dreht das Fehler-Vorzeichen waehrend der
+    Fahrt (Ziel ueberfahren), wird sofort sanft gestoppt (stopMove).
+
+A4) Feste, langsame Geschwindigkeit unabhaengig vom Winkel-Delta:
+    -> FIX: fehlerproportionale Geschwindigkeit clSpeedForError():
+       Restfehler >= TN_CL_FAST_DEG (10 Grad)  -> TN_CL_FAST_HZ (3000 Hz)
+       Restfehler nahe Toleranz                -> TN_CL_APPROACH_HZ (1200 Hz)
+       dazwischen linear interpoliert, begrenzt auf TN_MAX_HZ.
+       Die Geschwindigkeit wird auch WAEHREND einer laufenden Teil-
+       bewegung dem Restfehler nachgefuehrt (applySpeedAcceleration).
+
+Geaenderte Dateien:
+    components/config/include/config.h   (TN_CL_FAST_HZ, TN_CL_FAST_DEG)
+    components/axis/include/axis.h       (AngleControlCfg, CL-Zustaende)
+    components/axis/axis.cpp             (clSpeedForError, updateAngleControl)
+    main/main.cpp                        (Verdrahtung der neuen Parameter)
+    README.md                            (Doku der neuen Konstanten)
+
+WICHTIG vor dem Test:
+    TN_MOTOR_TO_SENSOR muss stimmen (aktuell -1). Ist es falsch, faehrt
+    der erste Teilschritt vom Ziel WEG; der Gain-Lerner passt sich bei
+    negativem Verhaeltnis bewusst NICHT an (k > 0 Guard), der Ueber-
+    schwing-Waechter und der Timeout fangen es ab — aber die Fahrt
+    schlaegt dann fehl. Einmalig per Jog pruefen: "TN:FWD" muss den per
+    "TN:ANGLE" gemeldeten Winkel VERGROESSERN.
+
+---------------------------------------------------------------------------
+ TEIL B: WEITERE VERBESSERUNGSVORSCHLAEGE (nicht umgesetzt)
+---------------------------------------------------------------------------
+
+B1) protocol.cpp — moeglicher 1-Byte-Pufferueberlauf bei der Antwort:
+    In uart_task wird an resp[] das '\n' angehaengt:
+        resp[rlen] = LINE_TERM; resp[rlen+1] = '\0';
+    Ist die Antwort exakt MAX_RESPONSE-1 Zeichen lang (snprintf darf das),
+    schreibt resp[rlen+1] auf Index 256 -> ausserhalb des Puffers.
+    Fix: Antwortlaenge vor dem Anhaengen auf MAX_RESPONSE-2 begrenzen
+    (oder resp auf MAX_RESPONSE+2 dimensionieren).
+
+B2) AZERO-Offset ist nicht persistent und nicht auslesbar:
+    setAngleZero() wirkt nur im RAM; nach Reboot gilt wieder
+    TN_ANGLE_OFFSET_DEG aus der config. Vorschlaege:
+      - Offset in NVS speichern und beim Boot laden.
+      - AZERO-Antwort um den Wert erweitern ("OK:AOFF=254.31").
+      - Offset optional ins STATUS-Telegramm aufnehmen.
+
+B3) TN:HOME ist erlaubt, obwohl TN kein Homing-Konzept hat:
+    home() wuerde TN blind Richtung "Referenzschalter" fahren; TN hat
+    aber nur das Zonengatter (MIN==MAX) und den Absolutsensor. Besser:
+    HOME fuer Achsen mit zone_gate_ (oder mit Winkelsensor) ablehnen.
+
+B4) driveAllowed(): Zonenmitte hart als (min_deg+max_deg)/2 angenommen:
+    Die Re-Entry-Logik geht davon aus, dass das physische Gatter
+    symmetrisch um 45 Grad (bei 0..90) liegt. Stimmt das mechanisch
+    nicht (oder verschiebt AZERO den Nullpunkt), kann die Rueckfahr-
+    Richtung falsch bestimmt werden. Vorschlag: eigene Konstante
+    TN_ZONE_CENTER_DEG statt der Ableitung aus min/max.
+
+B5) startMoveToAngle() prueft driveAllowed() nicht vor dem Start:
+    LabVIEW bekommt "OK", die Fahrt bricht aber ggf. im ersten
+    update()-Tick mit Sensor-Sperre ab. Vorabpruefung in Richtung des
+    Fehlers wuerde sofort einen Fehlercode liefern.
+
+B6) MOVE-Fehlercodes zu grob:
+    startMoveToAngle() kann aus 4 Gruenden fehlschlagen (Modus, kein
+    Sensor, Homing aktiv, Magnet fehlt); das Protokoll meldet nur
+    NO_MAGNET oder BUSY. Differenzierte Codes (ERR:HOMING, ERR:MODE)
+    erleichtern die Fehlersuche vom PC aus.
+
+B7) volatile statt std::atomic:
+    last_angle_deg_/last_magnet_ok_/cl_active_ werden aus der Control-
+    Task geschrieben und aus der UART-Task gelesen. Auf dem ESP32 sind
+    ausgerichtete 32-bit-Zugriffe faktisch atomar, aber volatile ist
+    laut C++-Standard keine Garantie. Sauberer: std::atomic<float>/
+    std::atomic<bool> (kostenneutral auf Xtensa).
+
+B8) I2C-Einzelfehler bricht laufende Winkelfahrt sofort ab:
+    Ein einzelner NACK/EMI-Fehler setzt last_magnet_ok_ = false ->
+    updateAngleControl() macht sofort forceStop mit Error. Vorschlag:
+    kleiner Fehlerzaehler (z.B. erst nach 3 Fehl-Lesungen in Folge
+    abbrechen), analog zum Mehrheitsfilter der Lichtschranken.
+
+B9) AS5600-Lesung blockiert die gemeinsame Control-Task:
+    Der I2C-Read laeuft synchron in update() der TN-Achse; haengt der
+    Bus (Stoerung, fehlender Pull-up), verzoegert das auch die
+    Endlagen-Ueberwachung von FV/TR/FR. Vorschlag: I2C-Timeout knapp
+    halten und/oder Sensor-Lesung in eigene Task auslagern.
+
+B10) STATUS meldet TNmin/TNmax doppelt:
+    Beide Felder lesen dasselbe Gatter (limit_min_pin_ == limit_max_pin_).
+    Fuer LabVIEW ggf. verwirrend; ein Feld "TNgate" waere klarer
+    (SENStn existiert bereits — Redundanz pruefen).
+
+B11) FastAccelStepper-Submodule hat lokale, uncommittete Aenderungen:
+    "modified content" im Submodule bedeutet: der Build ist auf einem
+    anderen Rechner NICHT reproduzierbar (git clone liefert die
+    Original-Lib). Aenderungen im Submodule committen (eigener Fork)
+    oder dokumentieren.
+
+B12) Keine Host-Tests fuer reine Rechenfunktionen:
+    computeAngle(), clSpeedForError() und die Gain-Logik sind pure
+    Funktionen und liessen sich ohne Hardware unit-testen (z.B.
+    Wrap-Verhalten bei 0/360, Interpolationsgrenzen).
+
+B13) uart_task liest byteweise:
+    Funktional korrekt, aber uart_read_bytes() koennte blockweise
+    lesen (weniger Syscalls). Rein kosmetisch bei 115200 Baud.
+
+B14) now_ms() nutzt 32 bit (Wrap nach ~49 Tagen):
+    Die Differenzbildung ist dank unsigned-Arithmetik trotzdem korrekt
+    — kein Fehler, nur als Doku-Hinweis.
+
+B15) Globaler STOP nutzt forceStop() (hart, ohne Rampe):
+    Fuer den Not-Halt richtig; fuer ein "sanftes Anhalten" aus LabVIEW
+    waere ein separater Befehl (stopMove auf allen Achsen) sinnvoll,
+    um mechanische Schlaege am Neigetisch zu vermeiden.
+
+===========================================================================
+ ENDE
+===========================================================================

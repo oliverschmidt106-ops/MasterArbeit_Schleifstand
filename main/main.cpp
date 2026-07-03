@@ -105,6 +105,8 @@ extern "C" void app_main(void)
         acfg.max_deg        = cfg::TN_ANGLE_MAX_DEG;
         acfg.tol_deg        = cfg::TN_CL_TOLERANCE_DEG;
         acfg.approach_hz    = cfg::TN_CL_APPROACH_HZ;
+        acfg.fast_hz        = cfg::TN_CL_FAST_HZ;
+        acfg.fast_deg       = cfg::TN_CL_FAST_DEG;
         acfg.approach_accel = cfg::TN_CL_APPROACH_ACCEL;
         acfg.damping        = cfg::TN_CL_DAMPING;
         acfg.settle_ticks   = cfg::TN_CL_SETTLE_TICKS;

@@ -189,10 +189,16 @@ constexpr int   TN_MOTOR_TO_SENSOR = -1;
 constexpr float TN_ANGLE_MIN_DEG = 0.0f;
 constexpr float TN_ANGLE_MAX_DEG = 90.0f;
 
-// Closed-Loop-Regelung "behutsam" (TN faehrt geregelt auf den Sollwinkel):
+// Closed-Loop-Regelung (TN faehrt geregelt auf den Sollwinkel):
+// Die Geschwindigkeit wird fehlerproportional gewaehlt: ab TN_CL_FAST_DEG
+// Restfehler voller Eilgang (TN_CL_FAST_HZ), nahe am Ziel Feinfahrt
+// (TN_CL_APPROACH_HZ), dazwischen linear interpoliert. Ein adaptiver Gain
+// lernt die reale Steps/Grad-Uebersetzung aus den gemessenen Teilbewegungen.
 constexpr float    TN_CL_TOLERANCE_DEG  = 0.2f;    // Zieltoleranz (+/- Grad)
-constexpr float    TN_CL_APPROACH_HZ    = 1200.0f;  // langsame Annaeherung
-constexpr uint32_t TN_CL_APPROACH_ACCEL = 4000;    // sanfte Rampe (steps/s^2)
+constexpr float    TN_CL_APPROACH_HZ    = 1200.0f; // Feinfahrt nahe am Ziel
+constexpr float    TN_CL_FAST_HZ        = 3000.0f; // Eilgang bei grossem Winkelfehler
+constexpr float    TN_CL_FAST_DEG       = 10.0f;   // ab diesem Restfehler voller Eilgang
+constexpr uint32_t TN_CL_APPROACH_ACCEL = 4000;    // Rampe (steps/s^2)
 constexpr float    TN_CL_DAMPING        = 0.9f;     // Anteil des Fehlers je Teilschritt
 constexpr int      TN_CL_SETTLE_TICKS   = 3;        // n Messungen in Toleranz = fertig
 constexpr uint32_t TN_CL_TIMEOUT_MS     = 40000;    // Sicherheits-Timeout

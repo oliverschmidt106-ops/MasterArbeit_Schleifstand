@@ -278,4 +278,9 @@ Alle in `components/config/include/config.h`:
 - `TN_ANGLE_SIGN` — Vorzeichen des gemeldeten Winkels (Anzeige-Konvention).
 - `TN_CL_TOLERANCE_DEG` (±0,2°), `TN_CL_APPROACH_HZ`, `TN_CL_APPROACH_ACCEL`,
   `TN_CL_DAMPING`, `TN_CL_SETTLE_TICKS`, `TN_CL_TIMEOUT_MS` — Regelverhalten.
+- `TN_CL_FAST_HZ` / `TN_CL_FAST_DEG` — fehlerproportionaler Eilgang: ab
+  `TN_CL_FAST_DEG` Restfehler fährt die Regelung mit `TN_CL_FAST_HZ`, nahe am
+  Ziel mit `TN_CL_APPROACH_HZ` (dazwischen linear). Zusätzlich lernt ein
+  adaptiver Gain die reale Steps/Grad-Übersetzung aus den Teilbewegungen und
+  ein Überschwing-Wächter stoppt sofort, wenn das Ziel überfahren wird.
 - Nullpunkt: `TN_ANGLE_OFFSET_DEG` oder zur Laufzeit per `TN:AZERO`.

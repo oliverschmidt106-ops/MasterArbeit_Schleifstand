@@ -215,14 +215,15 @@ bool Axis::startMoveToAngle(float target_deg) {
     if (target_deg < acfg_.min_deg) target_deg = acfg_.min_deg;
     if (target_deg > acfg_.max_deg) target_deg = acfg_.max_deg;
 
-    stepper_->setAcceleration(acfg_.approach_accel);          // sanfte Rampe
-    stepper_->setSpeedInHz(static_cast<uint32_t>(acfg_.approach_hz));
+    stepper_->setAcceleration(acfg_.approach_accel);
 
-    cl_target_   = target_deg;
-    cl_start_ms_ = now_ms();
-    cl_settle_   = 0;
-    cl_state_    = ClState::Moving;
-    cl_active_   = true;
+    cl_target_       = target_deg;
+    cl_start_ms_     = now_ms();
+    cl_settle_       = 0;
+    cl_err_positive_ = (target_deg - last_angle_deg_) > 0.0f;
+    cl_move_pending_ = false;
+    cl_state_        = ClState::Moving;
+    cl_active_       = true;
     ESP_LOGI(TAG, "%s: Winkelfahrt -> %.2f Grad (ist %.2f)",
              name_, target_deg, last_angle_deg_);
     return true;
@@ -238,8 +239,27 @@ void Axis::setAngleZero() {
     }
 }
 
-// Geschlossene Regelung: in kleinen, gedaempften Teilschritten an den
-// Sollwinkel heranfahren und nach jeder Bewegung neu messen (behutsam).
+// Fehlerproportionale Geschwindigkeit fuer die Winkelregelung: ab fast_deg
+// Restfehler voller Eilgang (fast_hz), unterhalb tol_deg Feinfahrt
+// (approach_hz), dazwischen linear. Begrenzt auf das Achsen-Limit max_hz_.
+uint32_t Axis::clSpeedForError(float abs_err_deg) const {
+    float lo = acfg_.approach_hz;
+    float hi = acfg_.fast_hz;
+    if (hi < lo)      hi = lo;        // Fehlkonfiguration abfangen
+    if (hi > max_hz_) hi = max_hz_;   // mechanisches Limit der Achse
+    float span = acfg_.fast_deg - acfg_.tol_deg;
+    float t = (span > 0.0f) ? (abs_err_deg - acfg_.tol_deg) / span : 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return static_cast<uint32_t>(lo + (hi - lo) * t);
+}
+
+// Geschlossene Regelung: in gedaempften Teilschritten an den Sollwinkel
+// heranfahren und nach jeder Bewegung neu messen. Waehrend einer laufenden
+// Teilbewegung wird der Restfehler live ueberwacht (Geschwindigkeit
+// nachfuehren, bei Ueberschiessen sofort stoppen). Ein adaptiver Gain lernt
+// die reale Steps/Grad-Uebersetzung, falls steps_per_unit_ nicht stimmt
+// (z.B. Getriebe zwischen Motor und Neige-Welle).
 void Axis::updateAngleControl() {
     // Sicherheits-Timeout.
     if (now_ms() - cl_start_ms_ > acfg_.timeout_ms) {
@@ -258,10 +278,11 @@ void Axis::updateAngleControl() {
         return;
     }
 
-    float err = cl_target_ - last_angle_deg_;
+    float err  = cl_target_ - last_angle_deg_;
+    float aerr = fabsf(err);
 
     // Innerhalb der Toleranz: anhalten und Beruhigung abwarten.
-    if (fabsf(err) <= acfg_.tol_deg) {
+    if (aerr <= acfg_.tol_deg) {
         if (stepper_->isRunning()) {
             stepper_->stopMove();          // sanft anhalten
         } else if (++cl_settle_ >= acfg_.settle_ticks) {
@@ -271,19 +292,51 @@ void Axis::updateAngleControl() {
         }
         return;
     }
-
     cl_settle_ = 0;
-    if (stepper_->isRunning()) return;     // aktuelle Teilbewegung erst beenden
 
-    // Naechste, gedaempfte Korrektur berechnen.
-    float   steps_f = err * steps_per_unit_ * static_cast<float>(acfg_.motor_sign)
-                      * acfg_.damping;
-    int32_t steps   = static_cast<int32_t>(lroundf(steps_f));
-    if (steps == 0) {                      // kleiner als ein Schritt -> erreicht
-        cl_state_  = ClState::Done;
-        cl_active_ = false;
+    if (stepper_->isRunning()) {
+        // Live-Ueberwachung der laufenden Teilbewegung:
+        // 1) Ziel ueberschossen (Fehler-Vorzeichen gedreht) -> sofort anhalten.
+        if ((err > 0.0f) != cl_err_positive_) {
+            stepper_->stopMove();
+            return;
+        }
+        // 2) Geschwindigkeit dem Restfehler nachfuehren (Eilgang -> Feinfahrt).
+        stepper_->setSpeedInHz(clSpeedForError(aerr));
+        stepper_->applySpeedAcceleration();
         return;
     }
+
+    // Abgeschlossene Teilbewegung auswerten: kommandierte vs. tatsaechlich
+    // gefahrene Grad vergleichen und den Gain nachfuehren. Kompensiert eine
+    // falsche steps_per_unit_-Kalibrierung, ohne moveToUnit() zu beeinflussen.
+    if (cl_move_pending_) {
+        cl_move_pending_ = false;
+        float actual = last_angle_deg_ - cl_move_start_deg_;
+        if (fabsf(cl_move_cmd_deg_) >= 0.5f) {
+            if (fabsf(actual) >= 0.1f) {
+                float k = cl_move_cmd_deg_ / actual;
+                if (k > 0.0f) {            // nur bei plausibler Richtung anpassen
+                    cl_gain_ *= k;
+                    if (cl_gain_ < 0.1f)  cl_gain_ = 0.1f;
+                    if (cl_gain_ > 20.0f) cl_gain_ = 20.0f;
+                }
+            } else {
+                // Kaum Bewegung trotz deutlichem Kommando: Uebersetzung stark
+                // unterschaetzt -> Gain verdoppeln (begrenzt; Timeout sichert ab).
+                cl_gain_ *= 2.0f;
+                if (cl_gain_ > 20.0f) cl_gain_ = 20.0f;
+            }
+        }
+    }
+
+    // Naechste, gedaempfte Korrektur berechnen. Mindestens 1 Schritt, damit
+    // die Regelung oberhalb der Toleranz nicht vorzeitig "fertig" meldet.
+    float   cmd_deg = err * acfg_.damping;
+    float   steps_f = cmd_deg * steps_per_unit_ * cl_gain_
+                      * static_cast<float>(acfg_.motor_sign);
+    int32_t steps   = static_cast<int32_t>(lroundf(steps_f));
+    if (steps == 0) steps = (steps_f >= 0.0f) ? 1 : -1;
 
     dir_positive_ = (steps > 0);
     // Sensor-Freigabe in Fahrtrichtung pruefen. Beim TN-Zonengatter erlaubt
@@ -295,7 +348,13 @@ void Axis::updateAngleControl() {
         return;
     }
 
-    stepper_->setSpeedInHz(static_cast<uint32_t>(acfg_.approach_hz));
+    // Bezugswerte fuer die Auswertung dieser Teilbewegung merken.
+    cl_err_positive_   = (err > 0.0f);
+    cl_move_start_deg_ = last_angle_deg_;
+    cl_move_cmd_deg_   = cmd_deg;
+    cl_move_pending_   = true;
+
+    stepper_->setSpeedInHz(clSpeedForError(aerr));
     stepper_->move(steps);                 // relative Teilbewegung (gerampt)
 }
 

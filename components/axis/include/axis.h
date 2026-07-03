@@ -34,8 +34,10 @@ struct AngleControlCfg {
     float    min_deg        = 0.0f;  // erlaubter Soll-Bereich (Minimum)
     float    max_deg        = 90.0f; // erlaubter Soll-Bereich (Maximum)
     float    tol_deg        = 0.2f;  // Zieltoleranz
-    float    approach_hz    = 500.0f;// langsame Annaeherungsgeschwindigkeit
-    uint32_t approach_accel = 1500;  // sanfte Rampe (steps/s^2)
+    float    approach_hz    = 500.0f;// Feinfahrt nahe am Ziel
+    float    fast_hz        = 3000.0f;// Eilgang bei grossem Winkelfehler
+    float    fast_deg       = 10.0f; // ab diesem Restfehler voller Eilgang
+    uint32_t approach_accel = 1500;  // Rampe (steps/s^2)
     float    damping        = 0.9f;  // Anteil des Fehlers je Teilschritt
     int      settle_ticks   = 3;     // n Messungen in Toleranz = fertig
     uint32_t timeout_ms     = 20000; // Sicherheits-Timeout
@@ -108,6 +110,9 @@ private:
     float hzFrom255(uint8_t value) const;  // lineares Mapping 0..255 -> Hz
     void  updateAngleControl();            // closed-loop SM (in update())
     float computeAngle(uint16_t raw) const;// Rohwert -> gemeldeter Winkel
+    // Fehlerproportionale CL-Geschwindigkeit: Eilgang bei grossem Restfehler,
+    // Feinfahrt nahe am Ziel (linear interpoliert, begrenzt auf max_hz_).
+    uint32_t clSpeedForError(float abs_err_deg) const;
     // Darf die Achse in 'forward'-Richtung fahren? Beruecksichtigt die FV-
     // Endschalter und das TN-Zonengatter inkl. AS5600-Re-Entry (Rueckfahrt zur
     // Zonenmitte, wenn das Gatter verlassen wurde).
@@ -151,4 +156,12 @@ private:
     float           cl_target_      = 0.0f;   // Sollwinkel
     uint32_t        cl_start_ms_    = 0;      // Startzeit (fuer Timeout)
     int             cl_settle_      = 0;      // Zaehler "in Toleranz"
+    // Adaptiver Gain: lernt die reale Steps/Grad-Uebersetzung (z.B. Getriebe)
+    // aus jeder abgeschlossenen Teilbewegung. Wirkt NUR in der Winkelregelung,
+    // beeinflusst positionUnit()/moveToUnit() nicht.
+    float           cl_gain_           = 1.0f;
+    bool            cl_err_positive_   = true;  // Fehler-Vorzeichen beim Start der Teilbewegung
+    bool            cl_move_pending_   = false; // Teilbewegung noch unbewertet
+    float           cl_move_start_deg_ = 0.0f;  // Ist-Winkel beim Start der Teilbewegung
+    float           cl_move_cmd_deg_   = 0.0f;  // kommandierte Grad der Teilbewegung
 };
