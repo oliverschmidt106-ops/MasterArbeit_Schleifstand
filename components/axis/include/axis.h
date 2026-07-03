@@ -77,6 +77,16 @@ public:
     bool home();                              // Referenzfahrt starten
     void setCalibration(float steps_per_unit);// steps/mm bzw. steps/deg setzen
     float positionUnit() const;               // Ist-Position aus Schrittzaehler
+    float stepsPerUnit() const { return steps_per_unit_; }
+    float positionSpeedHz() const;            // aktuelle Fahrgeschwindigkeit in Hz
+
+    // ----- Low-Level-Primitive fuer die FV-Ablaufsteuerung (fv-Modul) -----
+    // Kapseln FastAccelStepper weiterhin vollstaendig in axis.cpp; das
+    // Endlagen-Gating (driveAllowed) bleibt aktiv.
+    bool    runAtHz(bool forward, float hz);           // Dauerfahrt mit fester Frequenz
+    bool    moveToStepsAtHz(int32_t steps, float hz);  // Zielfahrt mit fester Frequenz
+    int32_t positionSteps() const;                     // roher Schrittzaehler
+    void    setCurrentPositionSteps(int32_t steps);    // Zaehler setzen (Referenzpunkt)
 
     // ----- Winkelsensor / Closed-Loop (nur TN) -----
     // Koppelt einen AS5600 an diese Achse und uebernimmt die Regelparameter.

@@ -7,6 +7,7 @@
 //     weiter (nicht blockierend).
 #include "axis.h"
 #include "config.h"
+#include "fv.h"
 #include "protocol.h"
 #include "as5600.h"
 
@@ -59,6 +60,9 @@ static void control_task(void *arg)
         axis_fr.update();
         axis_fv.update();
         axis_tn.update();
+        // FV-Zustandsmaschine NACH Axis::update() ticken: der Endlagen-
+        // Auto-Stopp muss bereits gegriffen haben (siehe fv.cpp).
+        fv_tick();
         vTaskDelayUntil(&last, period);
     }
 }
@@ -85,6 +89,9 @@ extern "C" void app_main(void)
     axis_fv.configurePosition(cfg::FV_STEPS_PER_MM,
                               cfg::PIN_FV_LIMIT_MIN, cfg::PIN_FV_LIMIT_MAX,
                               /*home_dir_positive=*/false);
+    //    FV-Zustandsmaschine (Homing/Park/Resume) an die Achse koppeln.
+    //    Neustart => NOT_HOMED, saved_position ungueltig (kein NVS).
+    fv_init(&axis_fv);
     //    TN: ein Zonengatter (GPIO9) auf MIN UND MAX -> symmetrischer Hard-Stop
     //        in beide Richtungen. Reine Sicherheitszone, KEINE Referenzfahrt
     //        (Absolutwinkel liefert der AS5600); HOME wird fuer TN nicht genutzt.

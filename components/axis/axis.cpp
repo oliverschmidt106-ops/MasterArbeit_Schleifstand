@@ -180,6 +180,53 @@ void Axis::setCalibration(float steps_per_unit) {
     if (steps_per_unit > 0.0f) steps_per_unit_ = steps_per_unit;
 }
 
+// ---------------------------------------------------------------------------
+//  Low-Level-Primitive fuer die FV-Ablaufsteuerung (fv-Modul)
+// ---------------------------------------------------------------------------
+// Dauerfahrt mit expliziter Schrittfrequenz (fuer die Homing-Suchphasen).
+// Endlagen-Gating bleibt aktiv: in eine gesperrte Richtung wird nicht
+// gestartet; das Erreichen der Schranke stoppt via update() (Auto-Stopp).
+bool Axis::runAtHz(bool forward, float hz) {
+    if (mode_ != AxisMode::Position || stepper_ == nullptr) return false;
+    if (cl_active_) return false;
+    if (hz <= 0.0f) return false;
+    if (!driveAllowed(forward)) return false;
+    dir_positive_ = forward;
+    stepper_->setAcceleration(accel_);
+    stepper_->setSpeedInHz(static_cast<uint32_t>(hz));
+    if (forward) stepper_->runForward();
+    else         stepper_->runBackward();
+    return true;
+}
+
+// Zielfahrt (absolute Schrittposition) mit expliziter Schrittfrequenz.
+bool Axis::moveToStepsAtHz(int32_t steps, float hz) {
+    if (mode_ != AxisMode::Position || stepper_ == nullptr) return false;
+    if (cl_active_) return false;
+    if (hz <= 0.0f) return false;
+    bool forward = (steps > stepper_->getCurrentPosition());
+    if (!driveAllowed(forward)) return false;
+    dir_positive_ = forward;
+    stepper_->setAcceleration(accel_);
+    stepper_->setSpeedInHz(static_cast<uint32_t>(hz));
+    stepper_->moveTo(steps);
+    return true;
+}
+
+int32_t Axis::positionSteps() const {
+    return (stepper_ != nullptr) ? stepper_->getCurrentPosition() : 0;
+}
+
+void Axis::setCurrentPositionSteps(int32_t steps) {
+    if (stepper_ != nullptr) stepper_->setCurrentPosition(steps);
+}
+
+// Aktuelle Positionier-Geschwindigkeit in Hz (GUI-Speed oder Default).
+float Axis::positionSpeedHz() const {
+    uint8_t v = (pos_speed255_ > 0) ? pos_speed255_ : cfg::POS_DEFAULT_SPEED;
+    return hzFrom255(v);
+}
+
 float Axis::positionUnit() const {
     if (stepper_ == nullptr || steps_per_unit_ == 0.0f) return 0.0f;
     return static_cast<float>(stepper_->getCurrentPosition()) / steps_per_unit_;

@@ -33,6 +33,9 @@ einer LabVIEW-GUI über einen zeilenbasierten ASCII-Befehlskanal (UART).
     │   ├── idf_component.yml      # zieht FastAccelStepper (Git-Dependency)
     │   ├── include/axis.h
     │   └── axis.cpp              # Rotation/Position/Endlagen/Homing + TN closed-loop
+    ├── fv/                       # FV-Zustandsmaschine (Homing/Park/Resume)
+    │   ├── include/fv.h
+    │   └── fv.cpp                # NOT_HOMED→HOMING→HOMED⇄PARKED, Softlimits
     └── protocol/                 # UART-Befehlskanal
         ├── include/protocol.h
         └── protocol.cpp          # lesen, parsen, dispatchen, quittieren
@@ -130,8 +133,11 @@ Einheitliche Konvention für alle drei Kanäle: **HIGH (~3,2 V) = Bewegung erlau
 **Verhalten:**
 
 - **FV** nutzt gerichtete Endschalter: FWD blockiert nur Vorwärts (BACK bleibt
-  zur Rückfahrt frei), BACK umgekehrt. `FV:HOME` referenziert gegen das
-  BACK-Limit (GPIO 11) und setzt dort den Nullpunkt.
+  zur Rückfahrt frei), BACK umgekehrt. `FV_HOME` referenziert **zweistufig**
+  gegen das BACK-Limit (GPIO 11): Eilgang bis Kontakt → Freifahren um
+  `FV_HOME_RELEASE_MM` → langsame zweite Anfahrt (Auslösepunkt = **0 mm**) →
+  Vorfahren auf den Arbeitspunkt `FV_HOME_OFFSET_MM`. Die Schranke bleibt danach
+  reiner Sicherheitsanschlag (`FV_PARK_POS_MM` liegt **davor**, nicht darin).
 - **TN** hat ein einzelnes **Zonengatter** als symmetrische Hard-Zone (intern auf
   MIN *und* MAX gelegt): solange HIGH (in der Zone), ist TN frei; verlässt TN die
   Zone (LOW), wird **sofort gestoppt**. Damit kein Deadlock entsteht, sperrt LOW
@@ -173,7 +179,7 @@ Befehle/Achsen sind case-insensitiv.
 | `PING`        | `OK`           | Verbindungstest (Verbinden)               |
 | `STOP`        | `OK`           | **Sofort-Stopp aller Achsen**             |
 | `STATUS`      | `STATUS:...`   | Statuszeile (siehe unten)                 |
-| `SENS?`       | `SENS:<tn>,<fwd>,<back>` | Logische Lichtschranken-Zustände, je `1`=erlaubt/`0`=stop |
+| `SENS?`       | `SENS:FVF=<0\|1>,FVB=<0\|1>,TNZ=<0\|1>` | Logische Lichtschranken-Zustände (FV vor/zurück, TN-Gatter), je `1`=erlaubt/`0`=stop |
 | `ENABLE`      | `OK`           | Treiber freigeben (EN LOW)                |
 | `DISABLE`     | `OK`           | Alle stoppen + Treiber sperren (EN HIGH)  |
 | `LIGHT:ON`    | `OK`           | Beleuchtung an                            |
@@ -190,18 +196,37 @@ Befehle/Achsen sind case-insensitiv.
 
 (FR identisch, Präfix `FR:`.)
 
-### FV / TN – Positionierung
+### FV – Faservorschub (Zustandsmaschine)
 
-| Senden               | Antwort              | Wirkung                                |
-|----------------------|----------------------|----------------------------------------|
-| `FV:SPEED:<0-255>`   | `OK`                 | Fahrgeschwindigkeit                    |
-| `FV:FWD`             | `OK`/`ERR:AT_LIMIT`  | Vor (bis Endlage). Alias `VOR`         |
-| `FV:BACK`            | `OK`/`ERR:AT_LIMIT`  | Zurück (bis Endlage). Alias `ZUR`      |
-| `FV:MOVE:<mm>`       | `OK`/`ERR:BUSY`      | Auf Position fahren (mm). Alias `GOTO` |
-| `FV:HOME`            | `OK`                 | Referenzfahrt (Richtung MIN)           |
-| `FV:STOP`            | `OK`                 | Sanft anhalten                         |
+FV besitzt eine Zustandsmaschine `NOT_HOMED → HOMING → HOMED ⇄ PARKED`
+(Modul `components/fv`). Jeder Neustart, jede während einer Positionierfahrt
+ausgelöste Lichtschranke und `FV:CAL` setzen auf `NOT_HOMED` zurück und
+invalidieren die gespeicherte Position.
 
-Für **TN** zusätzlich/analog (Winkel in Grad):
+| Senden           | Antwort                     | Wirkung                                        |
+|------------------|-----------------------------|------------------------------------------------|
+| `FV_HOME`        | `OK`/`ERR:BUSY`/`ERR:HOME_FAILED` | Zweistufige Referenzfahrt an der MIN-Schranke starten (nicht blockierend; Fortschritt per `FV_STATE?` pollen; Timeout ⇒ `STATE:NOT_HOMED`) |
+| `FV_PARK`        | `OK`/`ERR:NOT_HOMED`/`ERR:BUSY` | Position speichern, auf `FV_PARK_POS_MM` fahren, Zustand `PARKED` |
+| `FV_RESUME`      | `OK`/`ERR:NOT_PARKED`/`ERR:BUSY` | Zurück zur gespeicherten Position, Endanfahrt immer vorwärts mit `FV_BACKLASH_MM`-Kompensation |
+| `FV_MOVE:<±mm>`  | `OK`/`ERR:NOT_HOMED`/`ERR:LIMIT`/`ERR:BUSY` | **Relativfahrt** in mm (nur `HOMED`; Softlimits 0…`FV_MAX_TRAVEL_MM`) |
+| `FV_POS?`        | `POS:<mm>`                  | Ist-Position (Schrittzähler, 0 = Auslösepunkt MIN-Schranke) |
+| `FV_STATE?`      | `STATE:NOT_HOMED\|HOMING\|HOMED\|PARKED` | Zustand der FV-Maschine |
+| `FV:SPEED:<0-255>`| `OK`                       | Fahrgeschwindigkeit                            |
+| `FV:FWD`         | `OK`/`ERR:AT_LIMIT`/`ERR:PARKED`/`ERR:BUSY` | Vor (bis Endlage). Alias `VOR`. Nicht in `PARKED`/`HOMING` |
+| `FV:BACK`        | `OK`/`ERR:AT_LIMIT`/`ERR:PARKED`/`ERR:BUSY` | Zurück (bis Endlage). Alias `ZUR`              |
+| `FV:MOVE:<mm>`   | wie `FV_MOVE`               | **Absolutfahrt** auf Position (mm). Alias `GOTO`; nur `HOMED` |
+| `FV:HOME`        | wie `FV_HOME`               | Alias für `FV_HOME`                            |
+| `FV:POS?`        | `POS:<mm>`                  | Alias für `FV_POS?`                            |
+| `FV:CAL:<steps/mm>` | `OK`/`ERR:BAD_VALUE`     | Schritte/mm setzen (Messuhr-Kalibrierung) ⇒ `NOT_HOMED` |
+| `FV:STOP`        | `OK`                        | Sanft anhalten (bricht Park/Resume-Sequenz ab) |
+
+> Jog (`FV:FWD/BACK`) ist auch in `NOT_HOMED` erlaubt (Einrichten/Freifahren),
+> kennt aber keine Softlimits: löst dabei in `HOMED` eine Schranke aus, fällt
+> der Zustand konservativ auf `NOT_HOMED` zurück.
+
+### TN – Positionierung
+
+Für **TN** (Winkel in Grad):
 
 | Senden               | Antwort                       | Wirkung                                          |
 |----------------------|-------------------------------|--------------------------------------------------|
@@ -227,7 +252,9 @@ HOMEfv=<0..4>,HOMEtn=<0..4>,
 TNsens=<grad>,TNmag=<0|1>,TNcl=<0..3>,
 SENStn=<0|1>,SENSfwd=<0|1>,SENSback=<0|1>
 ```
-(eine Zeile, ohne Umbrüche). `HOMExx`: 0=Idle 1=Seeking 2=Backoff 3=Done 4=Error.
+(eine Zeile, ohne Umbrüche). `HOMEtn`: 0=Idle 1=Seeking 2=Backoff 3=Done 4=Error.
+`HOMEfv` wird aus der FV-Zustandsmaschine abgebildet: 0=`NOT_HOMED`,
+1=`HOMING`, 3=`HOMED`/`PARKED` (Details per `FV_STATE?`).
 `TR`/`FR`/`*run` = läuft (1) / steht (0). `*min`/`*max` = Endlage **gesperrt** (1,
 d. h. Pegel LOW). `TN` = Winkel aus Schrittzähler, **`TNsens`** = gemessener
 Ist-Winkel (AS5600), `TNmag` = Magnet erkannt (1), `TNcl` = Closed-Loop-Zustand
@@ -238,7 +265,8 @@ logischen Werte wie `SENS?` (1=erlaubt/0=stop).
 
 `ERR:UNKNOWN_CMD`, `ERR:UNKNOWN_AXIS`, `ERR:MISSING_VALUE`, `ERR:BAD_VALUE`,
 `ERR:NO_SPEED`, `ERR:AT_LIMIT`, `ERR:BUSY`, `ERR:HOME_FAILED`, `ERR:NO_SENSOR`,
-`ERR:NO_MAGNET`, `ERR:EMPTY`, `ERR:LINE_TOO_LONG`.
+`ERR:NO_MAGNET`, `ERR:EMPTY`, `ERR:LINE_TOO_LONG`; FV-Zustandsmaschine:
+`ERR:NOT_HOMED`, `ERR:NOT_PARKED`, `ERR:PARKED`, `ERR:LIMIT`, `ERR:BLOCKED`.
 
 ## Sicherheit
 
@@ -251,6 +279,10 @@ logischen Werte wie `SENS?` (1=erlaubt/0=stop).
   und erlaubt nur die AS5600-gestützte Rückfahrt zur Mitte (Re-Entry, kein Deadlock).
 - Homing **und** die TN-Winkelregelung laufen als nicht-blockierende
   State-Machines (keine `while`-Warteschleife).
+- FV ist encoderlos: löst während einer Positionierfahrt eine Schranke aus oder
+  wird die Referenzfahrt unterbrochen, fällt FV konservativ auf `NOT_HOMED`
+  zurück und die gespeicherte Park-Position wird invalidiert (kein
+  NVS-Persistieren über Neustarts).
 - Die TN-Winkelfahrt bricht ab bei Endlage, **fehlendem Magnet** oder Timeout.
 
 ## Anzupassende Konstanten (vor Inbetriebnahme)
@@ -258,7 +290,15 @@ logischen Werte wie `SENS?` (1=erlaubt/0=stop).
 Alle in `components/config/include/config.h`:
 
 - `DRIVER_IS_TMC2209` — zentraler Schalter A4988 ⇄ TMC2209 (DIR-Invert).
-- `FV_LEADSCREW_PITCH_MM` — Spindelsteigung → Schritte/mm.
+- `FV_LEADSCREW_PITCH_MM` — Spindelsteigung → Schritte/mm. **Aktuell
+  Platzhalter (2,0 mm)**: reale Steigung des XR25/M-Antriebs unbekannt, per
+  Messuhr kalibrieren (`FV:CAL:<steps/mm>` zur Laufzeit, dann hier eintragen).
+- **FV-Zustandsmaschine:** `FV_HOME_SPEED_FAST_HZ` / `FV_HOME_SPEED_SLOW_HZ`
+  (Referenzfahrt-Geschwindigkeiten), `FV_HOME_RELEASE_MM` (Freifahrweg),
+  `FV_HOME_OFFSET_MM` (Arbeitspunkt), `FV_HOME_MAX_TRAVEL_MM` (Timeout-Budget
+  je Suchphase), `FV_PARK_POS_MM` (Parkposition vor der Schranke),
+  `FV_BACKLASH_MM` (Umkehrspiel-Kompensation bei `FV_RESUME`, Startwert 0,5 mm,
+  per Messuhr verifizieren), `FV_MAX_TRAVEL_MM` (Softlimit, XR25/M: 25 mm).
 - `TN_STEPS_PER_DEG_DEFAULT` — Startwert; zur Laufzeit per `TN:CAL` kalibrierbar.
 - `PIN_TN_GATE` / `PIN_FV_LIM_FWD` / `PIN_FV_LIM_BACK` — die 3 Lichtschranken
   (SK-205NA-W, GPIO 9/10/11, **HIGH = erlaubt / LOW = stop**, externer

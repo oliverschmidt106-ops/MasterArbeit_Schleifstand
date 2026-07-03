@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "config.h"
+#include "fv.h"
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -146,8 +147,52 @@ static void handle_axis_position(Axis* ax, const char* cmd, const char* val,
     }
 }
 
+// Legacy-FV-Befehle (FV:<CMD>) durch die FV-Zustandsmaschine routen, damit es
+// genau EINE Homing-/Positionslogik gibt. SPEED/STOP bleiben generisch.
+static void handle_fv_legacy(Axis* ax, const char* cmd, const char* val,
+                             int ntok, char* resp) {
+    if (strcmp(cmd, "FWD") == 0 || strcmp(cmd, "VOR") == 0) {
+        strcpy(resp, fv_cmd_jog(true));
+    } else if (strcmp(cmd, "BACK") == 0 || strcmp(cmd, "ZUR") == 0) {
+        strcpy(resp, fv_cmd_jog(false));
+    } else if (strcmp(cmd, "HOME") == 0) {
+        strcpy(resp, fv_cmd_home());
+    } else if (strcmp(cmd, "STOP") == 0) {
+        ax->stop();
+        strcpy(resp, "OK");
+    } else if (strcmp(cmd, "SPEED") == 0) {
+        if (ntok < 3) { strcpy(resp, "ERR:MISSING_VALUE"); return; }
+        long v = strtol(val, nullptr, 10);
+        if (v < 0 || v > 255) { strcpy(resp, "ERR:BAD_VALUE"); return; }
+        ax->setPositionSpeed255(static_cast<uint8_t>(v));
+        strcpy(resp, "OK");
+    } else if (strcmp(cmd, "MOVE") == 0 || strcmp(cmd, "GOTO") == 0) {
+        if (ntok < 3) { strcpy(resp, "ERR:MISSING_VALUE"); return; }
+        strcpy(resp, fv_cmd_move_abs(strtof(val, nullptr)));
+    } else if (strcmp(cmd, "POS") == 0 || strcmp(cmd, "POS?") == 0) {
+        snprintf(resp, MAX_RESPONSE, "POS:%.3f", fv_position_mm());
+    } else if (strcmp(cmd, "CAL") == 0) {
+        if (ntok < 3) { strcpy(resp, "ERR:MISSING_VALUE"); return; }
+        float spu = strtof(val, nullptr);
+        if (spu <= 0.0f) { strcpy(resp, "ERR:BAD_VALUE"); return; }
+        ax->setCalibration(spu);
+        fv_invalidate();   // neue Umrechnung -> alle Positionsbezuege ungueltig
+        strcpy(resp, "OK");
+    } else {
+        strcpy(resp, "ERR:UNKNOWN_CMD");
+    }
+}
+
 static void build_status(Machine* m, char* resp) {
-    int hfv = m->fv ? static_cast<int>(m->fv->homing()) : 0;
+    // FV: Zustand der FV-Maschine auf die alte HomingState-Skala abbilden
+    // (0=Idle, 1=Seeking, 3=Done), damit bestehende LabVIEW-Parser weiterlaufen.
+    int hfv = 0;
+    switch (fv_state()) {
+    case FvState::Homing: hfv = 1; break;
+    case FvState::Homed:
+    case FvState::Parked: hfv = 3; break;
+    default:              hfv = 0; break;
+    }
     int htn = m->tn ? static_cast<int>(m->tn->homing()) : 0;
     // TN-Winkelsensor: gemessener Ist-Winkel (TNsens), Magnet-OK (TNmag),
     // Closed-Loop-Zustand (TNcl: 0=Idle 1=Moving 2=Done 3=Error).
@@ -191,18 +236,36 @@ static void process_line(Machine* m, char* line, char* resp) {
 
     const char* t0 = tok[0];
 
+    // --- FV-Zustandsmaschine (Unterstrich-Befehle, siehe fv.h) ---
+    if (strcmp(t0, "FV_HOME") == 0)   { strcpy(resp, fv_cmd_home());   return; }
+    if (strcmp(t0, "FV_PARK") == 0)   { strcpy(resp, fv_cmd_park());   return; }
+    if (strcmp(t0, "FV_RESUME") == 0) { strcpy(resp, fv_cmd_resume()); return; }
+    if (strcmp(t0, "FV_MOVE") == 0) {
+        if (ntok < 2) { strcpy(resp, "ERR:MISSING_VALUE"); return; }
+        strcpy(resp, fv_cmd_move_rel(strtof(tok[1], nullptr)));
+        return;
+    }
+    if (strcmp(t0, "FV_POS?") == 0) {
+        snprintf(resp, MAX_RESPONSE, "POS:%.3f", fv_position_mm());
+        return;
+    }
+    if (strcmp(t0, "FV_STATE?") == 0) {
+        snprintf(resp, MAX_RESPONSE, "STATE:%s", fv_state_str());
+        return;
+    }
+
     // --- Globale Ein-Wort-Befehle ---
     if (ntok == 1) {
         if (strcmp(t0, "PING") == 0)        { strcpy(resp, "OK"); return; }
         if (strcmp(t0, "STOP") == 0)        { m->stopAll(); strcpy(resp, "OK"); return; }
         if (strcmp(t0, "STATUS") == 0)      { build_status(m, resp); return; }
         // Logische Lichtschranken-Zustaende fuer LabVIEW: je 1 = erlaubt, 0 = stop.
-        // Reihenfolge: TN-Gatter, FV vorwaerts, FV rueckwaerts.
+        // FVF = FV vorwaerts, FVB = FV rueckwaerts, TNZ = TN-Zonengatter.
         if (strcmp(t0, "SENS?") == 0) {
-            snprintf(resp, MAX_RESPONSE, "SENS:%d,%d,%d",
-                     cfg::sensor_tn_drive_allowed() ? 1 : 0,
+            snprintf(resp, MAX_RESPONSE, "SENS:FVF=%d,FVB=%d,TNZ=%d",
                      cfg::sensor_fv_fwd_allowed()   ? 1 : 0,
-                     cfg::sensor_fv_back_allowed()  ? 1 : 0);
+                     cfg::sensor_fv_back_allowed()  ? 1 : 0,
+                     cfg::sensor_tn_drive_allowed() ? 1 : 0);
             return;
         }
         // ENABLE/DISABLE sind manuelle Overrides; im Normalbetrieb regelt das
@@ -229,6 +292,8 @@ static void process_line(Machine* m, char* line, char* resp) {
     const char* val = (ntok >= 3) ? tok[2] : "";
     if (ax->mode() == AxisMode::Rotation)
         handle_axis_rotation(ax, cmd, val, ntok, resp);
+    else if (ax == m->fv)
+        handle_fv_legacy(ax, cmd, val, ntok, resp);   // FV: Zustandsmaschine
     else
         handle_axis_position(ax, cmd, val, ntok, resp);
 }

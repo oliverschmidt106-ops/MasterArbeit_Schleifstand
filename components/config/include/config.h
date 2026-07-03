@@ -27,9 +27,12 @@ constexpr int FULLSTEPS_PER_REV   = 200;                                 // QSH4
 constexpr int STEPS_PER_REV       = FULLSTEPS_PER_REV * MICROSTEPS;      // = 3200
 
 // FV (Faservorschub): Umrechnung Schritte <-> mm.
-// ANPASSEN an die Spindelsteigung der Mechanik!
+// TODO(Kalibrierung): Spindelsteigung des XR25/M-Antriebs noch UNBEKANNT ->
+// Platzhalterwert! Nach Inbetriebnahme per Messuhr kalibrieren (FV:CAL:<spm>
+// zur Laufzeit oder Wert hier fest eintragen). Bis dahin sind alle mm-Angaben
+// der FV-Achse nur relativ zueinander korrekt.
 // Beispiel: Steigung 2 mm/Umdrehung -> 3200 / 2 = 1600 steps/mm.
-constexpr float FV_LEADSCREW_PITCH_MM = 2.0f;
+constexpr float FV_LEADSCREW_PITCH_MM = 2.0f;   // <-- PLATZHALTER
 constexpr float FV_STEPS_PER_MM       = STEPS_PER_REV / FV_LEADSCREW_PITCH_MM;
 
 // TN (Tischneigung): Umrechnung Schritte <-> Grad.
@@ -147,7 +150,38 @@ constexpr float    TN_MIN_HZ = 100.0f;  constexpr float    TN_MAX_HZ = 4000.0f; 
 constexpr uint8_t  POS_DEFAULT_SPEED = 128;
 
 // Homing-Rueckzug (steps) nach Erreichen des Endschalters.
+// (Nur noch fuer die generische Axis-Homing-SM; FV nutzt die eigene
+//  Zustandsmaschine im fv-Modul mit den Konstanten unten.)
 constexpr int32_t  HOMING_BACKOFF_STEPS = 200;
+
+// ===========================================================================
+//  FV-Zustandsmaschine: Referenzfahrt, Park & Resume (fv-Modul)
+// ===========================================================================
+// Zweistufige Referenzfahrt an der Min-Schranke (GPIO 11):
+//   1. Eilgang rueckwaerts bis Schranke LOW.
+//   2. Freifahren vorwaerts um FV_HOME_RELEASE_MM (Schranke wieder HIGH).
+//   3. Langsame zweite Anfahrt bis Schranke LOW -> Positionszaehler = 0.
+//   4. Vorfahren auf FV_HOME_OFFSET_MM (Arbeitspunkt frei von der Schranke).
+// Alle Positionen der FV-Achse beziehen sich danach auf den Ausloesepunkt
+// der Min-Schranke bei Langsamfahrt (= 0 mm).
+constexpr float FV_HOME_SPEED_FAST_HZ = 3000.0f; // Eilgang Suchfahrt (steps/s)
+constexpr float FV_HOME_SPEED_SLOW_HZ = 400.0f;  // langsame Referenz-Anfahrt (steps/s)
+constexpr float FV_HOME_RELEASE_MM    = 1.0f;    // Freifahrweg nach erstem Kontakt
+constexpr float FV_HOME_OFFSET_MM     = 2.0f;    // Arbeitspunkt nach Referenzfahrt
+// Wegbudget je Homing-Suchphase: wird mehr Weg zurueckgelegt, ohne dass die
+// Schranke schaltet -> Abbruch (Timeout), Zustand NOT_HOMED. XR25/M hat 25 mm
+// Verfahrweg; 30 mm decken jede Startposition ab.
+constexpr float FV_HOME_MAX_TRAVEL_MM = 30.0f;
+// Parkposition: kurz VOR der Min-Schranke, nicht hinein (Schranke bleibt
+// reiner Sicherheitsanschlag, kein zyklischer Referenzpunkt).
+constexpr float FV_PARK_POS_MM        = 1.0f;
+// Umkehrspiel-Kompensation bei FV_RESUME: Ziel wird zunaechst um diesen Betrag
+// UNTERfahren und die Endposition immer aus FV_APPROACH_DIR angefahren, damit
+// die letzte Bewegung dieselbe Richtung hat wie die manuelle Positionierung.
+constexpr float FV_BACKLASH_MM        = 0.5f;    // Startwert, per Messuhr verifizieren
+constexpr int   FV_APPROACH_DIR       = +1;      // Endanfahrt immer vorwaerts
+// Softlimit des nutzbaren Verfahrwegs (XR25/M: 25 mm, etwas darunter bleiben).
+constexpr float FV_MAX_TRAVEL_MM      = 23.0f;
 
 // ===========================================================================
 //  UART-Befehlskanal (LabVIEW <-> Firmware)
