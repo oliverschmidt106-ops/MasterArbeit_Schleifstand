@@ -133,11 +133,14 @@ Einheitliche Konvention für alle drei Kanäle: **HIGH (~3,2 V) = Bewegung erlau
 **Verhalten:**
 
 - **FV** nutzt gerichtete Endschalter: FWD blockiert nur Vorwärts (BACK bleibt
-  zur Rückfahrt frei), BACK umgekehrt. `FV_HOME` referenziert **zweistufig**
-  gegen das BACK-Limit (GPIO 11): Eilgang bis Kontakt → Freifahren um
-  `FV_HOME_RELEASE_MM` → langsame zweite Anfahrt (Auslösepunkt = **0 mm**) →
-  Vorfahren auf den Arbeitspunkt `FV_HOME_OFFSET_MM`. Die Schranke bleibt danach
-  reiner Sicherheitsanschlag (`FV_PARK_POS_MM` liegt **davor**, nicht darin).
+  zur Rückfahrt frei), BACK umgekehrt. `FV_HOME` referenziert gegen das
+  BACK-Limit (GPIO 11) und **vermisst dabei die Spanne**: Eilgang bis Kontakt →
+  Freifahren um `FV_HOME_RELEASE_MM` → langsame zweite Anfahrt (Auslösepunkt =
+  **0 mm**) → Eilgang vorwärts bis zum FWD-Limit (Spanne in Steps merken) →
+  zurück auf **Spanne/2 = Neutrallage mittig zwischen beiden Schranken**. Die
+  Mitte stimmt dadurch auch bei unkalibrierter Spindelsteigung. Die Schranken
+  bleiben danach reine Sicherheitsanschläge (`FV_PARK_POS_MM` liegt **vor** der
+  MIN-Schranke, nicht darin).
 - **TN** hat ein einzelnes **Zonengatter** als symmetrische Hard-Zone (intern auf
   MIN *und* MAX gelegt): solange HIGH (in der Zone), ist TN frei; verlässt TN die
   Zone (LOW), wird **sofort gestoppt**. Damit kein Deadlock entsteht, sperrt LOW
@@ -205,12 +208,14 @@ invalidieren die gespeicherte Position.
 
 | Senden           | Antwort                     | Wirkung                                        |
 |------------------|-----------------------------|------------------------------------------------|
-| `FV_HOME`        | `OK`/`ERR:BUSY`/`ERR:HOME_FAILED` | Zweistufige Referenzfahrt an der MIN-Schranke starten (nicht blockierend; Fortschritt per `FV_STATE?` pollen; Timeout ⇒ `STATE:NOT_HOMED`) |
+| `FV_HOME`        | `OK`/`ERR:BUSY`/`ERR:HOME_FAILED` | Referenzfahrt: zweistufig an der MIN-Schranke referenzieren, Spanne bis zur FWD-Schranke vermessen, dann **Neutrallage in der Mitte** anfahren (nicht blockierend; Fortschritt per `FV_STATE?` pollen; Timeout ⇒ `STATE:NOT_HOMED`) |
 | `FV_PARK`        | `OK`/`ERR:NOT_HOMED`/`ERR:BUSY` | Position speichern, auf `FV_PARK_POS_MM` fahren, Zustand `PARKED` |
 | `FV_RESUME`      | `OK`/`ERR:NOT_PARKED`/`ERR:BUSY` | Zurück zur gespeicherten Position, Endanfahrt immer vorwärts mit `FV_BACKLASH_MM`-Kompensation |
-| `FV_MOVE:<±mm>`  | `OK`/`ERR:NOT_HOMED`/`ERR:LIMIT`/`ERR:BUSY` | **Relativfahrt** in mm (nur `HOMED`; Softlimits 0…`FV_MAX_TRAVEL_MM`) |
+| `FV_MOVE:<±mm>`  | `OK`/`ERR:NOT_HOMED`/`ERR:LIMIT`/`ERR:BUSY` | **Relativfahrt** in mm (nur `HOMED`; Softlimits `FV_SOFT_MARGIN_MM` … gemessene Spanne − Rand, zusätzlich gekappt auf `FV_MAX_TRAVEL_MM`) |
 | `FV_POS?`        | `POS:<mm>`                  | Ist-Position (Schrittzähler, 0 = Auslösepunkt MIN-Schranke) |
 | `FV_STATE?`      | `STATE:NOT_HOMED\|HOMING\|HOMED\|PARKED` | Zustand der FV-Maschine |
+| `FV_ERR?`        | `FVERR:<grund>` / `FVERR:NONE` | Diagnose: letzter Grund für den Rückfall auf `NOT_HOMED` (z. B. Timeout, Schranke während Fahrt) |
+| `FV_SPAN?`       | `SPAN:<mm>` (`0.000` = unbekannt) | Beim Homing gemessener Schrankenabstand in config-mm; Basis der Steigungs-Kalibrierung: reale steps/mm = `FV_STEPS_PER_MM` · SPAN ÷ real gemessener Abstand |
 | `FV:SPEED:<0-255>`| `OK`                       | Fahrgeschwindigkeit                            |
 | `FV:FWD`         | `OK`/`ERR:AT_LIMIT`/`ERR:PARKED`/`ERR:BUSY` | Vor (bis Endlage). Alias `VOR`. Nicht in `PARKED`/`HOMING` |
 | `FV:BACK`        | `OK`/`ERR:AT_LIMIT`/`ERR:PARKED`/`ERR:BUSY` | Zurück (bis Endlage). Alias `ZUR`              |
@@ -290,15 +295,21 @@ logischen Werte wie `SENS?` (1=erlaubt/0=stop).
 Alle in `components/config/include/config.h`:
 
 - `DRIVER_IS_TMC2209` — zentraler Schalter A4988 ⇄ TMC2209 (DIR-Invert).
-- `FV_LEADSCREW_PITCH_MM` — Spindelsteigung → Schritte/mm. **Aktuell
-  Platzhalter (2,0 mm)**: reale Steigung des XR25/M-Antriebs unbekannt, per
-  Messuhr kalibrieren (`FV:CAL:<steps/mm>` zur Laufzeit, dann hier eintragen).
+- `FV_STEPS_PER_MM` — Schritte/mm der FV-Achse. **Empirisch kalibriert
+  (07/2026)** über Homing-Spanne (306 074 Steps) plus Bewegungsmessungen
+  (2 mm→3 mm, 6 mm→8,5 mm): **12 800 steps/mm** = exakt 0,25 mm/U
+  Feingewindespindel (Auflösung ~78 nm/Step; Spanne ⇒ 23,9 mm, konsistent mit
+  23,3 mm Schrankenabstand). Feinabgleich per Messuhr steht aus
+  (`FV:CAL:<steps/mm>` zur Laufzeit, dann hier nachziehen).
 - **FV-Zustandsmaschine:** `FV_HOME_SPEED_FAST_HZ` / `FV_HOME_SPEED_SLOW_HZ`
   (Referenzfahrt-Geschwindigkeiten), `FV_HOME_RELEASE_MM` (Freifahrweg),
-  `FV_HOME_OFFSET_MM` (Arbeitspunkt), `FV_HOME_MAX_TRAVEL_MM` (Timeout-Budget
-  je Suchphase), `FV_PARK_POS_MM` (Parkposition vor der Schranke),
-  `FV_BACKLASH_MM` (Umkehrspiel-Kompensation bei `FV_RESUME`, Startwert 0,5 mm,
-  per Messuhr verifizieren), `FV_MAX_TRAVEL_MM` (Softlimit, XR25/M: 25 mm).
+  `FV_HOME_MAX_TRAVEL_MM` (Wegbudget je Suchphase = Timeout),
+  `FV_SOFT_MARGIN_MM` (Sicherheitsrand der Softlimits zu beiden Schranken),
+  `FV_PARK_POS_MM` (Parkposition vor der Schranke), `FV_BACKLASH_MM`
+  (Umkehrspiel-Kompensation bei `FV_RESUME`, Startwert 0,5 mm, per Messuhr
+  verifizieren), `FV_MAX_TRAVEL_MM` (zusätzliche Softlimit-Kappe, XR25/M: 25 mm).
+  Die Neutrallage nach `FV_HOME` ist die **Mitte der beim Homing gemessenen
+  Schranken-Spanne** (keine eigene Konstante).
 - `TN_STEPS_PER_DEG_DEFAULT` — Startwert; zur Laufzeit per `TN:CAL` kalibrierbar.
 - `PIN_TN_GATE` / `PIN_FV_LIM_FWD` / `PIN_FV_LIM_BACK` — die 3 Lichtschranken
   (SK-205NA-W, GPIO 9/10/11, **HIGH = erlaubt / LOW = stop**, externer

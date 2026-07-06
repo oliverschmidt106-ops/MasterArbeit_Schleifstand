@@ -82,8 +82,8 @@ public:
 
     // ----- Low-Level-Primitive fuer die FV-Ablaufsteuerung (fv-Modul) -----
     // Kapseln FastAccelStepper weiterhin vollstaendig in axis.cpp; das
-    // Endlagen-Gating (driveAllowed) bleibt aktiv.
-    bool    runAtHz(bool forward, float hz);           // Dauerfahrt mit fester Frequenz
+    // Endlagen-Gating (driveAllowed) bleibt aktiv. Bewusst nur Zielfahrten
+    // (moveTo) -- Run-Befehle direkt nach forceStop verschluckt die Lib.
     bool    moveToStepsAtHz(int32_t steps, float hz);  // Zielfahrt mit fester Frequenz
     int32_t positionSteps() const;                     // roher Schrittzaehler
     void    setCurrentPositionSteps(int32_t steps);    // Zaehler setzen (Referenzpunkt)

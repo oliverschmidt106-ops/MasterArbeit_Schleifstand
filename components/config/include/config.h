@@ -27,13 +27,18 @@ constexpr int FULLSTEPS_PER_REV   = 200;                                 // QSH4
 constexpr int STEPS_PER_REV       = FULLSTEPS_PER_REV * MICROSTEPS;      // = 3200
 
 // FV (Faservorschub): Umrechnung Schritte <-> mm.
-// TODO(Kalibrierung): Spindelsteigung des XR25/M-Antriebs noch UNBEKANNT ->
-// Platzhalterwert! Nach Inbetriebnahme per Messuhr kalibrieren (FV:CAL:<spm>
-// zur Laufzeit oder Wert hier fest eintragen). Bis dahin sind alle mm-Angaben
-// der FV-Achse nur relativ zueinander korrekt.
-// Beispiel: Steigung 2 mm/Umdrehung -> 3200 / 2 = 1600 steps/mm.
-constexpr float FV_LEADSCREW_PITCH_MM = 2.0f;   // <-- PLATZHALTER
-constexpr float FV_STEPS_PER_MM       = STEPS_PER_REV / FV_LEADSCREW_PITCH_MM;
+// EMPIRISCH KALIBRIERT (07/2026), zweistufig:
+//   1) Homing-Spanne: 306074 Steps zwischen den Ausloesepunkten.
+//   2) Bewegungsmessung: FV_MOVE 2,0 -> real 3,0 mm / 6,0 -> real 8,5 mm
+//      => 12500..13250 steps/mm.
+// Mechanisch passt exakt eine 0,25-mm/U-Feingewindespindel:
+//   3200 / 0,25 = 12800 steps/mm  (Aufloesung ~78 nm/Step).
+// Gegenprobe: Spanne 306074/12800 = 23,9 mm ~ gemessener Schrankenabstand
+// 23,3 mm (der Ausloeseabstand entspricht dem Schrankenabstand; die frueher
+// angesetzte Fahnenbreiten-Subtraktion war falsch).
+// TODO(Kalibrierung): Feinabgleich per Messuhr (zur Laufzeit FV:CAL:<spm>,
+// dann Wert hier nachziehen).
+constexpr float FV_STEPS_PER_MM = 12800.0f;
 
 // TN (Tischneigung): Umrechnung Schritte <-> Grad.
 // MUSS kalibrierbar sein -> hier nur Default-Startwert; zur Laufzeit ueber
@@ -142,7 +147,12 @@ constexpr bool TN_DIR_INVERT = DRIVER_IS_TMC2209;
 // ACCEL in steps/s^2 (Rampe gegen Schrittverlust bei hoher Drehzahl).
 constexpr float    TR_MIN_HZ = 100.0f;  constexpr float    TR_MAX_HZ = 8000.0f;  constexpr uint32_t TR_ACCEL = 4000;
 constexpr float    FR_MIN_HZ = 100.0f;  constexpr float    FR_MAX_HZ = 8000.0f;  constexpr uint32_t FR_ACCEL = 4000;
-constexpr float    FV_MIN_HZ = 100.0f;  constexpr float    FV_MAX_HZ = 6000.0f;  constexpr uint32_t FV_ACCEL = 8000;
+// FV: Durch die feine Spindel (12800 steps/mm) sind hohe Schrittraten
+// noetig, um brauchbare Vorschuebe zu erreichen: 12000 steps/s = ~0,94 mm/s
+// (= 225 U/min am Motor, mit A4988 an 24 V am Aufbau getestet). Bei
+// Schrittverlust (Brummen ohne Bewegung, FV_ERR? meldet Timeout) zuerst
+// hier reduzieren.
+constexpr float    FV_MIN_HZ = 100.0f;  constexpr float    FV_MAX_HZ = 12000.0f; constexpr uint32_t FV_ACCEL = 16000;
 constexpr float    TN_MIN_HZ = 100.0f;  constexpr float    TN_MAX_HZ = 4000.0f;  constexpr uint32_t TN_ACCEL = 6000;
 
 // Default-Fahrgeschwindigkeit (0..255) der Positionierachsen, falls die GUI
@@ -157,21 +167,26 @@ constexpr int32_t  HOMING_BACKOFF_STEPS = 200;
 // ===========================================================================
 //  FV-Zustandsmaschine: Referenzfahrt, Park & Resume (fv-Modul)
 // ===========================================================================
-// Zweistufige Referenzfahrt an der Min-Schranke (GPIO 11):
+// Referenzfahrt an der Min-Schranke (GPIO 11) mit Spannen-Vermessung:
 //   1. Eilgang rueckwaerts bis Schranke LOW.
 //   2. Freifahren vorwaerts um FV_HOME_RELEASE_MM (Schranke wieder HIGH).
 //   3. Langsame zweite Anfahrt bis Schranke LOW -> Positionszaehler = 0.
-//   4. Vorfahren auf FV_HOME_OFFSET_MM (Arbeitspunkt frei von der Schranke).
+//   4. Eilgang vorwaerts bis FWD-Schranke LOW -> gemessene Spanne merken.
+//   5. Zurueck auf Spanne/2 = Neutrallage MITTIG zwischen den Schranken.
 // Alle Positionen der FV-Achse beziehen sich danach auf den Ausloesepunkt
-// der Min-Schranke bei Langsamfahrt (= 0 mm).
-constexpr float FV_HOME_SPEED_FAST_HZ = 3000.0f; // Eilgang Suchfahrt (steps/s)
-constexpr float FV_HOME_SPEED_SLOW_HZ = 400.0f;  // langsame Referenz-Anfahrt (steps/s)
-constexpr float FV_HOME_RELEASE_MM    = 1.0f;    // Freifahrweg nach erstem Kontakt
-constexpr float FV_HOME_OFFSET_MM     = 2.0f;    // Arbeitspunkt nach Referenzfahrt
-// Wegbudget je Homing-Suchphase: wird mehr Weg zurueckgelegt, ohne dass die
-// Schranke schaltet -> Abbruch (Timeout), Zustand NOT_HOMED. XR25/M hat 25 mm
-// Verfahrweg; 30 mm decken jede Startposition ab.
+// der Min-Schranke bei Langsamfahrt (= 0 mm). Die Mittellage stimmt auch bei
+// unkalibrierter Spindelsteigung (Spanne wird in Steps gemessen).
+constexpr float FV_HOME_SPEED_FAST_HZ = 12000.0f; // Eilgang Suchfahrt (steps/s, = FV_MAX_HZ)
+constexpr float FV_HOME_SPEED_SLOW_HZ = 2000.0f;  // langsame Referenz-Anfahrt (~0,1 mm/s)
+constexpr float FV_HOME_RELEASE_MM    = 1.0f;     // Freifahrweg nach erstem Kontakt
+// Wegbudget je Homing-Suchphase (als begrenzte Zielfahrt umgesetzt): endet die
+// Fahrt, ohne dass die Schranke schaltet -> Abbruch (Timeout), NOT_HOMED.
+// Mit kalibrierter Umrechnung sind das echte mm: 30 mm decken den vollen
+// Verfahrweg (Schrankenabstand real 23,3 mm) aus jeder Startposition ab.
 constexpr float FV_HOME_MAX_TRAVEL_MM = 30.0f;
+// Sicherheitsrand der Softlimits zu beiden Schranken: FV_MOVE darf sich den
+// Ausloesepunkten nur bis auf diesen Abstand naehern.
+constexpr float FV_SOFT_MARGIN_MM     = 0.5f;
 // Parkposition: kurz VOR der Min-Schranke, nicht hinein (Schranke bleibt
 // reiner Sicherheitsanschlag, kein zyklischer Referenzpunkt).
 constexpr float FV_PARK_POS_MM        = 1.0f;

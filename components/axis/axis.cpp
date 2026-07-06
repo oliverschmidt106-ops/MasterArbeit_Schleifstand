@@ -183,23 +183,12 @@ void Axis::setCalibration(float steps_per_unit) {
 // ---------------------------------------------------------------------------
 //  Low-Level-Primitive fuer die FV-Ablaufsteuerung (fv-Modul)
 // ---------------------------------------------------------------------------
-// Dauerfahrt mit expliziter Schrittfrequenz (fuer die Homing-Suchphasen).
+// Zielfahrt (absolute Schrittposition) mit expliziter Schrittfrequenz.
+// Bewusst NUR moveTo (kein runForward/runBackward): moveTo loescht ein evtl.
+// noch gesetztes force_immediate_stop-Flag der Lib (siehe forceStop oben),
+// Run-Befehle wuerden direkt nach einem forceStop verschluckt.
 // Endlagen-Gating bleibt aktiv: in eine gesperrte Richtung wird nicht
 // gestartet; das Erreichen der Schranke stoppt via update() (Auto-Stopp).
-bool Axis::runAtHz(bool forward, float hz) {
-    if (mode_ != AxisMode::Position || stepper_ == nullptr) return false;
-    if (cl_active_) return false;
-    if (hz <= 0.0f) return false;
-    if (!driveAllowed(forward)) return false;
-    dir_positive_ = forward;
-    stepper_->setAcceleration(accel_);
-    stepper_->setSpeedInHz(static_cast<uint32_t>(hz));
-    if (forward) stepper_->runForward();
-    else         stepper_->runBackward();
-    return true;
-}
-
-// Zielfahrt (absolute Schrittposition) mit expliziter Schrittfrequenz.
 bool Axis::moveToStepsAtHz(int32_t steps, float hz) {
     if (mode_ != AxisMode::Position || stepper_ == nullptr) return false;
     if (cl_active_) return false;
@@ -419,7 +408,12 @@ bool Axis::stop() {
 
 void Axis::forceStop() {
     if (stepper_ == nullptr) return;
-    stepper_->forceStop();          // sofort, ohne Rampe
+    // Nur stoppen, wenn wirklich etwas laeuft: forceStop() der Lib setzt
+    // force_immediate_stop, das nur von move()/moveTo() wieder geloescht wird.
+    // Bei stehendem Motor bliebe das Flag haengen und wuerde den naechsten
+    // runForward()/runBackward() kommentarlos verschlucken (keep_running
+    // loescht es nicht, siehe RampGenerator.cpp Zeile 131 ff.).
+    if (stepper_->isRunning()) stepper_->forceStop();   // sofort, ohne Rampe
     if (mode_ == AxisMode::Rotation) speed255_ = 0;
     if (homing_ == HomingState::Seeking || homing_ == HomingState::Backoff)
         homing_ = HomingState::Error;

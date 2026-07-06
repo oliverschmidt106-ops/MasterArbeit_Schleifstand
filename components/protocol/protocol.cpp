@@ -253,6 +253,17 @@ static void process_line(Machine* m, char* line, char* resp) {
         snprintf(resp, MAX_RESPONSE, "STATE:%s", fv_state_str());
         return;
     }
+    if (strcmp(t0, "FV_ERR?") == 0) {
+        // Diagnose: warum ist die FV-Maschine zuletzt auf NOT_HOMED gefallen?
+        snprintf(resp, MAX_RESPONSE, "FVERR:%s", fv_last_error());
+        return;
+    }
+    if (strcmp(t0, "FV_SPAN?") == 0) {
+        // Beim Homing gemessener Schrankenabstand in config-mm (0 = unbekannt);
+        // Eingangsgroesse fuer die Steigungs-Kalibrierung (FV:CAL).
+        snprintf(resp, MAX_RESPONSE, "SPAN:%.3f", fv_span_mm());
+        return;
+    }
 
     // --- Globale Ein-Wort-Befehle ---
     if (ntok == 1) {

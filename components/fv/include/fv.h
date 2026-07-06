@@ -28,6 +28,8 @@ void fv_tick();
 FvState     fv_state();
 const char* fv_state_str();     // "NOT_HOMED" / "HOMING" / "HOMED" / "PARKED"
 float       fv_position_mm();   // Ist-Position aus dem Schrittzaehler
+const char* fv_last_error();    // letzter Abbruchgrund oder "NONE" (FV_ERR?)
+float       fv_span_mm();       // beim Homing gemessene Spanne, 0 = unbekannt
 
 // --- Protokoll-Befehle (Rueckgabe = Antwortzeile ohne '\n') ---
 const char* fv_cmd_home();                // FV_HOME  (nicht blockierend)
