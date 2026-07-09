@@ -66,7 +66,7 @@ constexpr gpio_num_t PIN_TN_DIR  = GPIO_NUM_18;
 // Gemeinsamer Enable (aktiv LOW) fuer ALLE vier A4988 (CNC-Shield: eine
 // gemeinsame EN-Leitung, Arduino-Pin D8). Bei Boot deaktiviert (HIGH).
 // TODO(Hardware): Konkreten GPIO der verdrahteten EN-Leitung hier eintragen!
-constexpr gpio_num_t PIN_EN = GPIO_NUM_8;   // <-- PLATZHALTER, anpassen
+constexpr gpio_num_t PIN_EN = GPIO_NUM_8;   
 
 // ===========================================================================
 //  Stepper-Auto-Disable (FastAccelStepper Auto-Enable)
@@ -116,6 +116,15 @@ constexpr uint32_t SENSOR_SAMPLE_MS    = 1;  // Abtastperiode des Filters (FreeR
 
 // Beleuchtung (Ausgang -> MOSFET)
 constexpr gpio_num_t PIN_LIGHT = GPIO_NUM_14;
+
+// Gehaeuseluefter: 2x 24-V-Luefter parallel ueber EINEN Low-Side-N-MOSFET
+// (AO3400), reines Digital-Schalten (HIGH = Luefter an, kein PWM).
+// Pin-Wahl GPIO 13 (Audit 07/2026): auf dem S3 kein Strapping-Pin, keine
+// Flash-/PSRAM-/USB-Funktion, nach Reset hochohmig (treibt beim Boot nichts)
+// und auf dem DevKitC-Header direkt neben PIN_LIGHT (GPIO 14) -> beide
+// MOSFET-Ausgaenge nebeneinander. Gate-Pull-down ~100k an den AO3400 legen,
+// damit das Gate vor fan_init() nicht floatet.
+constexpr gpio_num_t PIN_FAN = GPIO_NUM_13;
 
 // Zuordnung Sensoren -> Achs-Endlagen (das Achsmodell kennt MIN/MAX):
 //   FV: gerichtete Endschalter. Vorwaertsfahrt (dir_positive) stoppt an MAX,

@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "config.h"
+#include "fan.h"
 #include "fv.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -279,6 +280,13 @@ static void process_line(Machine* m, char* line, char* resp) {
                      cfg::sensor_tn_drive_allowed() ? 1 : 0);
             return;
         }
+        // Luefter-Zustand: 1/0 = an/aus, AUTO/MANUAL = Automatik oder Override.
+        if (strcmp(t0, "FAN?") == 0) {
+            snprintf(resp, MAX_RESPONSE, "FAN:%d,%s",
+                     fan_is_on() ? 1 : 0,
+                     fan_is_auto() ? "AUTO" : "MANUAL");
+            return;
+        }
         // ENABLE/DISABLE sind manuelle Overrides; im Normalbetrieb regelt das
         // Auto-Enable von FastAccelStepper den gemeinsamen EN-Pin selbst.
         if (strcmp(t0, "ENABLE") == 0)      { cfg::set_drivers_enabled(true);  strcpy(resp, "OK"); return; }
@@ -292,6 +300,15 @@ static void process_line(Machine* m, char* line, char* resp) {
         if (strcmp(tok[1], "ON") == 0)       { cfg::set_light(true);  strcpy(resp, "OK"); }
         else if (strcmp(tok[1], "OFF") == 0) { cfg::set_light(false); strcpy(resp, "OK"); }
         else                                 strcpy(resp, "ERR:BAD_VALUE");
+        return;
+    }
+
+    // --- Luefter: manueller Override (ON/OFF) bzw. zurueck zur Automatik ---
+    if (strcmp(t0, "FAN") == 0) {
+        if (strcmp(tok[1], "ON") == 0)        { fan_set(true);  strcpy(resp, "OK"); }
+        else if (strcmp(tok[1], "OFF") == 0)  { fan_set(false); strcpy(resp, "OK"); }
+        else if (strcmp(tok[1], "AUTO") == 0) { fan_auto();     strcpy(resp, "OK"); }
+        else                                  strcpy(resp, "ERR:BAD_VALUE");
         return;
     }
 

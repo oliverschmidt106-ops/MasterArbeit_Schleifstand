@@ -33,6 +33,9 @@ einer LabVIEW-GUI über einen zeilenbasierten ASCII-Befehlskanal (UART).
     │   ├── idf_component.yml      # zieht FastAccelStepper (Git-Dependency)
     │   ├── include/axis.h
     │   └── axis.cpp              # Rotation/Position/Endlagen/Homing + TN closed-loop
+    ├── fan/                      # Gehäuselüfter (folgt TR/FR-Aktivität)
+    │   ├── include/fan.h
+    │   └── fan.cpp               # Automatik + manueller Override (FAN:ON/OFF/AUTO)
     ├── fv/                       # FV-Zustandsmaschine (Homing/Park/Resume)
     │   ├── include/fv.h
     │   └── fv.cpp                # NOT_HOMED→HOMING→HOMED⇄PARKED, Softlimits
@@ -153,6 +156,25 @@ Einheitliche Konvention für alle drei Kanäle: **HIGH (~3,2 V) = Bewegung erlau
   Gatter ist der Not-Backstop. *(Sonderfall: fehlt bei LOW der Magnet, ist die
   Seite nicht bestimmbar → fail-safe in beide Richtungen gesperrt.)*
 
+## Gehäuselüfter (FAN)
+
+Zwei 24-V-Gehäuselüfter hängen parallel an **einem** Low-Side-N-MOSFET (AO3400),
+geschaltet über **GPIO 13** (`cfg::PIN_FAN`) — reines Digital-Schalten
+(HIGH = Lüfter an), **kein PWM**.
+
+**Pin-Wahl GPIO 13 (Audit 07/2026):** auf dem ESP32-S3 kein Strapping-Pin, keine
+Flash-/PSRAM- (33–37) oder USB-Funktion (19/20), nach Reset hochohmig (kein
+unkontrolliertes Anlaufen beim Boot) und auf dem DevKitC-Header direkt neben
+`PIN_LIGHT` (GPIO 14) → beide MOSFET-Ausgänge nebeneinander.
+**Gate-Pull-down ~100 kΩ** am AO3400 vorsehen, damit das Gate zwischen Reset und
+`fan_init()` definiert LOW liegt.
+
+**Automatik:** Die Lüfter laufen, solange **TR oder FR** tatsächlich dreht
+(`isRunning()`, geprüft im 10-ms-Zyklus der Steuer-Task) — inklusive
+Auslauframpe nach `STOP`; sonst aus. `FAN:ON`/`FAN:OFF` erzwingt den Zustand
+manuell und friert die Automatik ein, `FAN:AUTO` gibt sie wieder frei.
+Beim Boot ist der GPIO definiert LOW (Lüfter aus).
+
 ## Serielle Parameter (für LabVIEW VISA)
 
 | Parameter             | Wert      |
@@ -187,6 +209,10 @@ Befehle/Achsen sind case-insensitiv.
 | `DISABLE`     | `OK`           | Alle stoppen + Treiber sperren (EN HIGH)  |
 | `LIGHT:ON`    | `OK`           | Beleuchtung an                            |
 | `LIGHT:OFF`   | `OK`           | Beleuchtung aus                           |
+| `FAN?`        | `FAN:<0\|1>,<AUTO\|MANUAL>` | Lüfter-Zustand (an/aus) + Modus |
+| `FAN:ON`      | `OK`           | Lüfter manuell an (Automatik aus)         |
+| `FAN:OFF`     | `OK`           | Lüfter manuell aus (Automatik aus)        |
+| `FAN:AUTO`    | `OK`           | Zurück zur Automatik (folgt TR/FR)        |
 
 ### TR / FR – Dauerrotation
 
@@ -318,6 +344,7 @@ Alle in `components/config/include/config.h`:
   (FWD=MAX, BACK=MIN). `SENSOR_GO_LEVEL` / `SENSOR_STOP_LEVEL` für die Polarität,
   `SENSOR_VOTE_SAMPLES` / `SENSOR_SAMPLE_MS` für den Entprell-Mehrheitsfilter.
 - `*_MIN_HZ` / `*_MAX_HZ` / `*_ACCEL` — Drehzahlband und Rampe pro Achse.
+- `PIN_FAN` — Lüfter-MOSFET (GPIO 13, siehe Abschnitt „Gehäuselüfter").
 - `UART_TX_PIN` / `UART_RX_PIN` / `UART_BAUD` — Befehlskanal.
 
 **AS5600 / TN-Winkelregelung:**

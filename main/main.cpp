@@ -7,6 +7,7 @@
 //     weiter (nicht blockierend).
 #include "axis.h"
 #include "config.h"
+#include "fan.h"
 #include "fv.h"
 #include "protocol.h"
 #include "as5600.h"
@@ -63,6 +64,9 @@ static void control_task(void *arg)
         // FV-Zustandsmaschine NACH Axis::update() ticken: der Endlagen-
         // Auto-Stopp muss bereits gegriffen haben (siehe fv.cpp).
         fv_tick();
+        // Luefter folgt der TR/FR-Aktivitaet (nach den Axis-Updates, damit
+        // der Schaltzustand den aktuellen Lauf-Zustand dieses Zyklus sieht).
+        fan_update();
         vTaskDelayUntil(&last, period);
     }
 }
@@ -92,6 +96,9 @@ extern "C" void app_main(void)
     //    FV-Zustandsmaschine (Homing/Park/Resume) an die Achse koppeln.
     //    Neustart => NOT_HOMED, saved_position ungueltig (kein NVS).
     fv_init(&axis_fv);
+    //    Gehaeuseluefter: GPIO als Output, initial LOW (aus); schaltet danach
+    //    automatisch mit der TR/FR-Aktivitaet (fan_update() in control_task).
+    fan_init(&axis_tr, &axis_fr);
     //    TN: ein Zonengatter (GPIO9) auf MIN UND MAX -> symmetrischer Hard-Stop
     //        in beide Richtungen. Reine Sicherheitszone, KEINE Referenzfahrt
     //        (Absolutwinkel liefert der AS5600); HOME wird fuer TN nicht genutzt.
